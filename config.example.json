@@ -1,0 +1,34 @@
+{
+  "models": {
+    "ollama_host": "http://127.0.0.1:11434",
+    "chat_model": "llama3",
+    "analyze_model": "deepseek-coder:6.7b"
+  },
+  "rag": {
+    "enabled": false,
+    "top_k": 4
+  },
+  "streaming": {
+    "live_markdown": true,
+    "refresh_per_second": 20
+  },
+  "memory": {
+    "max_messages": 80,
+    "persist_path": "~/.local/share/ask/chat.sqlite",
+    "context_search_enabled": true,
+    "context_search_top_k": 6,
+    "context_exclude_recent_messages": 24
+  },
+  "ui": {
+    "banner_font": "slant",
+    "banner_title": "ASK AI",
+    "banner_subtitle": "Offline Developer AI Assistant",
+    "show_banner_on_ai_command": true,
+    "chat_header": "ASK AI Chat (type 'exit' to quit)",
+    "exit_hint": "Commands: /model · /models · /help · Type 'exit' to quit",
+    "show_response_label": true,
+    "response_label": "AI Response:",
+    "startup_animation": true,
+    "typing_delay_ms": 8
+  }
+}

@@ -1,0 +1,18 @@
+"""Neon cyberpunk palette (Rich markup style names)."""
+
+# Core neon
+CYAN = "bright_cyan"
+MAGENTA = "bright_magenta"
+PINK = "magenta"
+GREEN = "bright_green"
+YELLOW = "bright_yellow"
+WHITE = "bright_white"
+DIM = "dim"
+RED = "bright_red"
+BLUE = "bright_blue"
+BORDER = "cyan"
+TITLE = "bold bright_magenta"
+SUBTITLE = "bold cyan"
+MATRIX_DIM = "dim green"
+STATUS_ON = "bold bright_green"
+STATUS_DIM = "dim cyan"

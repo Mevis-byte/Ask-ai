@@ -7,7 +7,8 @@ setup(
     install_requires=[
         "typer",
         "rich",
-        "ollama"
+        "ollama",
+        "pyfiglet",
     ],
     entry_points={
         "console_scripts": [
