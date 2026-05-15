@@ -262,7 +262,7 @@ Current implementation is read-focused and avoids unrestricted system modificati
 
 ## Main Interface
 
-![Main UI](./screenshots/askai1.png)
+![Main UI](./screenshots/askai2.png)
 
 ---
 
