@@ -1,220 +1,296 @@
 # ask.ai
 
-A local AI assistant that runs directly inside the terminal using Ollama and LLaMA 3.
+> Offline AI workstation built for the terminal.
 
-ask.ai is designed for people who want fast, private, and offline AI access without depending on cloud APIs or subscriptions. The project focuses on coding assistance, file analysis, debugging, and general AI interaction while keeping everything on the user's machine.
+ask.ai is a local AI-powered terminal assistant designed for developers, Linux users, and cybersecurity enthusiasts who want fast AI assistance without relying on cloud services.
 
----
-
-## Overview
-
-Most AI tools today rely on cloud infrastructure. That means internet dependency, API limits, subscriptions, latency, and privacy concerns.
-
-ask.ai takes a different approach.
-
-The entire system runs locally using Ollama with the LLaMA 3 model, allowing users to interact with AI completely offline from the terminal.
-
-The assistant is optimized for:
-
-* Coding help
-* File analysis
-* Debugging
-* CLI workflows
-* Learning and experimentation
-* Offline environments
+Built on top of Ollama and local LLMs, ask.ai runs completely offline, supports multiple models, streams responses in real time, analyzes files, remembers conversations locally, and provides a workstation-style terminal interface.
 
 ---
 
-## Main Features
+# Preview
 
-### Offline Execution
+## Neural Workstation UI
 
-ask.ai works fully offline using locally installed Ollama models.
+![ask.ai UI](./screenshots/neural-shell-ui.png)
 
-### Privacy Focused
+---
 
-No cloud APIs or external processing. Everything stays on the local machine.
+# Features
 
-### Streaming Responses
+## Local & Offline
 
-Real-time token streaming directly inside the terminal for faster and smoother interaction.
+* Runs fully offline using Ollama
+* No internet connection required
+* Local-first workflow
+* Better privacy and control over data
 
-### Syntax Highlighted Output
+## Real-Time Streaming
 
-Code responses are rendered with syntax highlighting for better readability.
+* Token-by-token streaming responses
+* Smooth terminal interaction
+* Fast response rendering
 
-### Multi-Model Support
+## Multi-Model Support
 
-Switch between different Ollama models dynamically.
+Switch between different local models directly from the terminal.
 
-Example:
+Examples:
+
+* llama3
+* deepseek-coder
+* mistral
+* codellama
+
+## File Intelligence
+
+ask.ai can:
+
+* read files
+* explain code
+* summarize files
+* review source code
+* analyze project structure
+
+Supported workflows:
 
 ```bash
-/model llama3
-/model mistral
+/explain main.py
+/review app.js
+/summarize config.yaml
 ```
 
-### Coding Assistance
+## Local Memory System
 
-Supports:
+* Persistent chat history
+* SQLite-based memory
+* Session tracking
+* Local conversation storage
 
-* Code generation
-* Debugging
-* Refactoring help
-* Algorithm explanations
-* Multiple programming languages
+## Syntax Highlighting
 
-### File Analysis
+* Rich-based code rendering
+* Automatic language detection
+* Clean terminal formatting
 
-Analyze local source files and receive context-aware explanations.
+## Workstation UI
 
-### Terminal-Based UI
-
-Built for CLI workflows with Rich-powered terminal rendering.
-
----
-
-## Tech Stack
-
-| Component     | Technology |
-| ------------- | ---------- |
-| Language      | Python     |
-| Model Runtime | Ollama     |
-| AI Model      | LLaMA 3    |
-| CLI Framework | Typer      |
-| Terminal UI   | Rich       |
-| Validation    | Pydantic   |
-
-Dependencies are managed through `requirements.txt`. fileciteturn0file0
+* Terminal-based interface
+* Structured panels
+* Status indicators
+* Session management
+* Retro workstation-inspired layout
 
 ---
 
-## Installation
+# Tech Stack
 
-### Clone the Repository
+| Component          | Technology                 |
+| ------------------ | -------------------------- |
+| AI Backend         | Ollama                     |
+| Models             | LLaMA 3, DeepSeek, Mistral |
+| Language           | Python                     |
+| CLI Framework      | Typer                      |
+| Terminal Rendering | Rich                       |
+| TUI System         | Textual                    |
+| Local Database     | SQLite                     |
+| Packaging          | setuptools                 |
+
+---
+
+# Installation
+
+## 1. Clone Repository
 
 ```bash
 git clone https://github.com/Mevis-byte/Ask-ai.git
 cd Ask-ai
 ```
 
-### Install Dependencies
+---
+
+## 2. Create Virtual Environment
+
+### Linux / macOS
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### Windows
+
+```powershell
+python -m venv venv
+venv\Scripts\activate
+```
+
+---
+
+## 3. Install Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Install Ollama
+---
 
-urlOllama[https://ollama.com](https://ollama.com)
+## 4. Install Ollama
 
-### Download the Model
+Download Ollama:
+
+[https://ollama.com](https://ollama.com)
+
+Pull a model:
 
 ```bash
-ollama run llama3
+ollama pull llama3
+```
+
+Optional models:
+
+```bash
+ollama pull deepseek-coder:6.7b
+ollama pull mistral
 ```
 
 ---
 
-## Running the Project
+# Running ask.ai
 
 ```bash
-python main.py
+python -m ask.main ai
 ```
 
-Example prompts:
+or:
 
 ```bash
-ask "Explain quick sort"
-```
-
-```bash
-ask "Debug this Python code"
-```
-
-```bash
-ask "Analyze this file"
+ask ai
 ```
 
 ---
 
-## Project Structure
+# Commands
+
+| Command              | Description           |
+| -------------------- | --------------------- |
+| `ask ai`             | Launch workstation UI |
+| `ask chat`           | Start AI chat session |
+| `ask analyze <file>` | Analyze source code   |
+| `/read <file>`       | Display file contents |
+| `/explain <file>`    | Explain file logic    |
+| `/review <file>`     | Review code quality   |
+| `/summarize <file>`  | Summarize file        |
+
+---
+
+# Project Structure
 
 ```text
-Ask-ai/
+ask/
+├── app/
+│   ├── chat.py
+│   ├── workstation.py
+│   └── session_manager.py
 │
-├── main.py
-├── requirements.txt
-├── README.md
-├── analyzer/
-├── docs/
-├── screenshots/
-└── assets/
+├── memory/
+│   ├── sqlite_memory.py
+│   └── factory.py
+│
+├── tools/
+│   ├── file_reader.py
+│   ├── analyzer.py
+│   └── context_loader.py
+│
+├── ui/
+│   └── workstation.py
+│
+└── main.py
 ```
 
 ---
 
-## Interface Preview
+# Why ask.ai?
 
-### Neural Shell UI
+Most AI assistants today are:
 
-![ask.ai Neural Shell](./screenshots/neural-shell.png)
+* cloud dependent
+* subscription locked
+* privacy invasive
+* browser focused
 
-The interface is built around a cyberpunk-inspired terminal aesthetic using Rich-powered rendering, real-time streaming responses, status panels, memory indicators, and multi-model support.
+ask.ai was built around a different idea:
 
-Features shown in the interface:
+```text
+AI should feel like part of your operating system.
+```
 
-* Real-time streaming responses
-* Local SQLite memory system
-* Multi-model support
-* Cyberpunk terminal UI
-* Structured response panels
-* Offline Ollama integration
-* Neural-shell inspired design language
-
----
-
-## Why ask.ai?
-
-The goal of the project is to make AI more accessible and private.
-
-Instead of relying on cloud-based systems, ask.ai gives users direct local access to AI capabilities from the terminal.
-
-This makes it useful for:
-
-* Developers
-* Students
-* Researchers
-* Privacy-focused users
-* Offline environments
-* Learning and experimentation
+The goal is to create a local AI workstation that integrates naturally into terminal workflows while remaining private, customizable, and developer-focused.
 
 ---
 
-## Future Improvements
+# Roadmap
 
-Planned additions include:
+Planned features:
 
-* Persistent local memory
-* Voice assistant mode
+* Workspace-wide project context
 * Plugin system
+* Autonomous task mode
 * Local RAG/document search
-* Autonomous agent workflows
-* Advanced terminal animations
-* GUI version
+* Voice assistant mode
+* Better session management
+* Git integration
+* Local embeddings support
+* Improved Textual UI
 
 ---
 
-## License
+# Security & Privacy
+
+ask.ai is designed with a local-first workflow.
+
+* Conversations stay on device
+* Files are analyzed locally
+* No cloud APIs required
+* No external data collection
+
+Current implementation is read-focused and avoids unrestricted system modification.
+
+---
+
+# Screenshots
+
+## Main Interface
+
+![Main UI](./screenshots/neural-shell-ui.png)
+
+---
+
+# Contributing
+
+Contributions, ideas, and improvements are welcome.
+
+Possible areas:
+
+* UI improvements
+* Textual layouts
+* plugin system
+* memory improvements
+* performance optimization
+* model integrations
+
+---
+
+# Author
+
+Mevis Lobo
+
+GitHub:
+[https://github.com/Mevis-byte](https://github.com/Mevis-byte)
+
+---
+
+# License
 
 MIT License
 
----
-
-## Author
-
-Developed by Mevis-byte
-
-GitHub:
-
-urlMevis-byte GitHub[https://github.com/Mevis-byte](https://github.com/Mevis-byte)
