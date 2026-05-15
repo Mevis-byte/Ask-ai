@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,8 +13,10 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
+    title TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    saved_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -49,8 +52,151 @@ END;
 """
 
 
+@dataclass(frozen=True)
+class ConversationSummary:
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    saved_at: str | None
+    message_count: int
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _default_title(conversation_id: str) -> str:
+    if conversation_id == "default":
+        return "Default"
+    return conversation_id.replace("_", " ").replace("-", " ").title()
+
+
+def _is_readonly_error(exc: sqlite3.OperationalError) -> bool:
+    return "readonly" in str(exc).lower()
+
+
+def _conversation_columns(conn: sqlite3.Connection) -> set[str]:
+    return {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_conversation_columns(conn: sqlite3.Connection) -> None:
+    columns = _conversation_columns(conn)
+    if "title" not in columns:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
+        except sqlite3.OperationalError as exc:
+            if _is_readonly_error(exc):
+                return
+            raise
+    if "saved_at" not in columns:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN saved_at TEXT")
+        except sqlite3.OperationalError as exc:
+            if _is_readonly_error(exc):
+                return
+            raise
+
+
+def _ensure_schema_on_connection(conn: sqlite3.Connection) -> None:
+    conn.executescript(_SCHEMA)
+    _ensure_conversation_columns(conn)
+
+
+def ensure_sqlite_memory_db(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        _ensure_schema_on_connection(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_conversations(db_path: Path) -> list[ConversationSummary]:
+    try:
+        ensure_sqlite_memory_db(db_path)
+    except sqlite3.OperationalError as exc:
+        if not _is_readonly_error(exc) or not db_path.exists():
+            raise
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, "conversations"):
+            return []
+        columns = _conversation_columns(conn)
+        title_expr = "COALESCE(NULLIF(c.title, ''), c.id)" if "title" in columns else "c.id"
+        saved_expr = "c.saved_at" if "saved_at" in columns else "NULL"
+        rows = conn.execute(
+            f"""
+            SELECT
+                c.id,
+                {title_expr} AS title,
+                c.created_at,
+                c.updated_at,
+                {saved_expr} AS saved_at,
+                COUNT(m.id) AS message_count
+            FROM conversations AS c
+            LEFT JOIN messages AS m ON m.conversation_id = c.id
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC, c.created_at DESC
+            """
+        ).fetchall()
+        return [
+            ConversationSummary(
+                id=str(row["id"]),
+                title=str(row["title"]),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+                saved_at=str(row["saved_at"]) if row["saved_at"] is not None else None,
+                message_count=int(row["message_count"]),
+            )
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def mark_conversation_saved(
+    db_path: Path,
+    conversation_id: str,
+    *,
+    title: str | None = None,
+) -> None:
+    ensure_sqlite_memory_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        columns = _conversation_columns(conn)
+        if "title" not in columns or "saved_at" not in columns:
+            raise sqlite3.OperationalError("session metadata columns are unavailable")
+        now = _utc_now()
+        effective_title = title.strip() if title and title.strip() else _default_title(conversation_id)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, saved_at)
+            VALUES (?, ?, ?, ?, NULL)
+            """,
+            (conversation_id, effective_title, now, now),
+        )
+        conn.execute(
+            """
+            UPDATE conversations
+            SET title = ?, updated_at = ?, saved_at = ?
+            WHERE id = ?
+            """,
+            (effective_title, now, now, conversation_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _build_fts_query(text: str) -> str | None:
@@ -90,18 +236,44 @@ class SqliteChatMemory:
         self._ensure_conversation()
 
     def _ensure_schema(self) -> None:
-        self._conn.executescript(_SCHEMA)
+        try:
+            _ensure_schema_on_connection(self._conn)
+        except sqlite3.OperationalError as exc:
+            if not _is_readonly_error(exc):
+                raise
         self._conn.commit()
 
     def _ensure_conversation(self) -> None:
         now = _utc_now()
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO conversations (id, created_at, updated_at)
-            VALUES (?, ?, ?)
-            """,
-            (self._conversation_id, now, now),
-        )
+        columns = _conversation_columns(self._conn)
+        try:
+            if "title" in columns and "saved_at" in columns:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, saved_at)
+                    VALUES (?, ?, ?, ?, NULL)
+                    """,
+                    (self._conversation_id, _default_title(self._conversation_id), now, now),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE conversations
+                    SET title = COALESCE(NULLIF(title, ''), ?)
+                    WHERE id = ?
+                    """,
+                    (_default_title(self._conversation_id), self._conversation_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO conversations (id, created_at, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (self._conversation_id, now, now),
+                )
+        except sqlite3.OperationalError as exc:
+            if not _is_readonly_error(exc):
+                raise
         self._conn.commit()
 
     def _touch_conversation(self) -> None:

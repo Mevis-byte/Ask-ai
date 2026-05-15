@@ -1,7 +1,6 @@
 import typer
 
 from ask.app.analysis import analyze_file
-from ask.app.bootstrap import build_default_chat_app
 from ask.config import load_settings
 from ask.models import OllamaChatBackend
 from ask.ui import ConsoleUI
@@ -20,21 +19,30 @@ def analyze(file: str) -> None:
 
 @app.command()
 def ai() -> None:
-    """Launch Ask AI interface."""
+    """Launch the Textual Ask AI workstation."""
     settings = load_settings()
-    ui = ConsoleUI(settings)
-    if settings.ui_startup_animation:
-        ui.play_startup_animation()
-    elif settings.show_banner_on_ai_command:
-        ui.print_banner()
-    ui.print_hint(settings.ui_exit_hint)
-    build_default_chat_app(settings, ui).run()
+    try:
+        from ask.app.workstation import run_default_workstation
+    except ModuleNotFoundError as exc:
+        if exc.name == "textual":
+            typer.echo("Textual is required for the workstation UI. Install project dependencies first.")
+            raise typer.Exit(1) from exc
+        raise
+    run_default_workstation(settings)
 
 
 @app.command()
 def chat() -> None:
-    """Start AI chat directly."""
-    build_default_chat_app().run()
+    """Start the Textual chat workstation directly."""
+    settings = load_settings()
+    try:
+        from ask.app.workstation import run_default_workstation
+    except ModuleNotFoundError as exc:
+        if exc.name == "textual":
+            typer.echo("Textual is required for the workstation UI. Install project dependencies first.")
+            raise typer.Exit(1) from exc
+        raise
+    run_default_workstation(settings)
 
 
 if __name__ == "__main__":

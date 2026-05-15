@@ -9,6 +9,7 @@ setup(
         "rich",
         "ollama",
         "pyfiglet",
+        "textual>=0.85.0",
     ],
     entry_points={
         "console_scripts": [

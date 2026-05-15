@@ -9,6 +9,13 @@ from ask.streaming import collect_stream_text, iter_ollama_text_deltas
 from ask.ui import ConsoleUI
 
 
+def inject_memory_snippets(text: str, snippets: list[str]) -> str:
+    if not snippets:
+        return text
+    block = "Relevant prior conversation (retrieved):\n" + "\n---\n".join(snippets)
+    return f"{block}\n\n---\n\n{text}"
+
+
 class ChatApplication:
     """Wires config, memory, RAG, plugins, streaming, and UI into a REPL."""
 
@@ -61,10 +68,7 @@ class ChatApplication:
 
     @staticmethod
     def _inject_memory_snippets(text: str, snippets: list[str]) -> str:
-        if not snippets:
-            return text
-        block = "Relevant prior conversation (retrieved):\n" + "\n---\n".join(snippets)
-        return f"{block}\n\n---\n\n{text}"
+        return inject_memory_snippets(text, snippets)
 
     def run(self) -> None:
         self._ui.print_chat_header()
