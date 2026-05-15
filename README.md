@@ -12,7 +12,7 @@ Built on top of Ollama and local LLMs, ask.ai runs completely offline, supports 
 
 ## Neural Workstation UI
 
-![ask.ai UI](./screenshots/neural-shell-ui.png)
+![ask.ai UI](./screenshots/askai1.png)
 
 ---
 
