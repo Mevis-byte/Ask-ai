@@ -294,6 +294,7 @@ askai (recommended)
 | `/export`               | Export full session as markdown |
 | `/clear`                | Clear session transcript        |
 | `/help`                 | Display all commands            |
+| `/quit`                 | Exit Ask.ai                     |
 ---
 
 # Project Structure
