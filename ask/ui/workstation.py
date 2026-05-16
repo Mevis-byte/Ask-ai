@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import shutil
 import subprocess
 import sys
@@ -16,10 +17,66 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Input, Static
+from textual.suggester import Suggester
+from textual import events
+
+
+class CommandSuggester(Suggester):
+    """Provides autocomplete suggestions for commands and models with stable cycling."""
+    
+    def __init__(self, app: 'AskWorkstationApp') -> None:
+        super().__init__(use_cache=False)
+        self.app = app
+        self.commands = [
+            "/help", "/workspace", "/context", "/clear-context", "/read",
+            "/explain", "/summarize", "/review", "/find", "/git-status",
+            "/git-diff", "/git-log", "/explain-commit", "/generate-commit",
+            "/new", "/save", "/sessions", "/session", "/resume", "/clear",
+            "/quit", "/save-file", "/export", "/copy", "/print", "/model",
+            "/models", "/baseurl"
+        ]
+        self._last_index = 0
+
+    def cycle(self) -> None:
+        self._last_index += 1
+
+    def reset_cycle(self) -> None:
+        self._last_index = 0
+
+    async def get_suggestion(self, value: str) -> str | None:
+        if not value or not value.startswith("/"):
+            return None
+        
+        matches = await self.get_all_suggestions(value)
+        if not matches:
+            return None
+            
+        return matches[self._last_index % len(matches)]
+
+    async def get_all_suggestions(self, value: str) -> list[str]:
+        """Returns all possible matches for a given input value."""
+        if not value.startswith("/"):
+            return []
+        
+        parts = value.split(" ", 1)
+        cmd = parts[0].lower()
+        
+        results = []
+        if len(parts) == 1:
+            for c in self.commands:
+                if c.startswith(cmd):
+                    results.append(c)
+        elif cmd == "/model":
+            prefix = parts[1].lower()
+            for model_name, _ in self.app._installed_models:
+                if model_name.lower().startswith(prefix):
+                    results.append(f"/model {model_name}")
+        
+        return results
 
 from ask.app.chat import inject_memory_snippets
 from ask.app.session_manager import ChatSessionManager, SessionInfo, derive_session_title
-from ask.config import Settings
+from ask.config import Settings, save_user_settings
 from ask.files import (
     ContextSummary,
     FileFindResult,
@@ -153,13 +210,77 @@ class AskWorkstationApp(App[None]):
         Binding("ctrl+n", "new_session", "New Session"),
         Binding("ctrl+s", "save_session", "Save Session"),
         Binding("ctrl+y", "copy_last_response", "Copy Last Response"),
-        Binding("tab", "focus_next_pane", "Switch Pane"),
         Binding("ctrl+c", "quit_request", "Exit"),
     ]
 
     TITLE = "ask.ai workstation"
     SUB_TITLE = "local neural shell"
     ENABLE_COMMAND_PALETTE = False
+
+    async def on_key(self, event: events.Key) -> None:
+        input_widget = self.query_one("#command-input", Input)
+        
+        if event.key == "up" and input_widget.has_focus:
+            if not self._command_history:
+                return
+            
+            # If we're at the start of navigation, save current typing
+            if self._history_index == -1:
+                self._current_typing_buffer = input_widget.value
+            
+            if self._history_index < len(self._command_history) - 1:
+                self._history_index += 1
+                # History is appended to, so most recent is at the end.
+                # Index 0 will be the most recent.
+                idx = -(self._history_index + 1)
+                input_widget.value = self._command_history[idx]
+                input_widget.cursor_position = len(input_widget.value)
+            
+            event.stop()
+            event.prevent_default()
+            return
+
+        if event.key == "down" and input_widget.has_focus:
+            if self._history_index == -1:
+                return
+            
+            self._history_index -= 1
+            if self._history_index == -1:
+                input_widget.value = self._current_typing_buffer
+            else:
+                idx = -(self._history_index + 1)
+                input_widget.value = self._command_history[idx]
+            
+            input_widget.cursor_position = len(input_widget.value)
+            event.stop()
+            event.prevent_default()
+            return
+
+        if event.key == "tab":
+            if input_widget.has_focus and input_widget.value.strip():
+                if input_widget.suggester:
+                    # Check if there are actually multiple matches to cycle
+                    matches = await input_widget.suggester.get_all_suggestions(input_widget.value)
+                    if matches:
+                        # Increment the suggester's cycle index
+                        input_widget.suggester.cycle()
+                        # Trigger a refresh of the ghost suggestion
+                        val = input_widget.value
+                        input_widget.value = ""
+                        input_widget.value = val
+                        
+                        event.stop()
+                        event.prevent_default()
+                        return
+            
+            # Allow pane switching if empty or from other panes
+            self.action_focus_next_pane()
+            event.stop()
+            event.prevent_default()
+        else:
+            # Any other key resets the cycling state so typing is predictable
+            if input_widget.suggester:
+                input_widget.suggester.reset_cycle()
 
     def __init__(
         self,
@@ -198,6 +319,9 @@ class AskWorkstationApp(App[None]):
             summary_model=settings.router_summary_model,
         )
         self._git = GitPlugin(max_diff_lines=settings.git_max_diff_lines)
+        self._command_history: list[str] = []
+        self._history_index: int = -1
+        self._current_typing_buffer: str = ""
 
     def compose(self) -> ComposeResult:
         yield Static("ASK.AI // LOCAL WORKSTATION // OLLAMA TERMINAL OS", id="topbar")
@@ -210,6 +334,7 @@ class AskWorkstationApp(App[None]):
         yield Input(
             placeholder="command or message  /read  /explain  /summarize  /review",
             id="command-input",
+            suggester=CommandSuggester(self),
         )
 
     def on_mount(self) -> None:
@@ -233,7 +358,24 @@ class AskWorkstationApp(App[None]):
             pass
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
+        input_widget = self.query_one("#command-input", Input)
+        # If there is a visible ghost suggestion, fill it but don't run yet
+        suggestion = getattr(input_widget, "_suggestion", "")
+        if suggestion:
+            input_widget.value = suggestion
+            input_widget.cursor_position = len(input_widget.value)
+            # Clear the internal suggestion so the next enter submits
+            input_widget._suggestion = ""
+            return
+
         value = event.value.strip()
+        if value:
+            # Add to history if it's different from the last entry
+            if not self._command_history or self._command_history[-1] != value:
+                self._command_history.append(value)
+            self._history_index = -1
+            self._current_typing_buffer = ""
+
         self.query_one("#command-input", Input).value = ""
         if not value:
             return
@@ -251,8 +393,16 @@ class AskWorkstationApp(App[None]):
         if self._streaming:
             self._notice("stream active; finish current response before creating a session")
             return
+        
+        # Validate current model exists before carrying it over
+        if self._installed_models:
+            if not any(m[0] == self._active_chat_model for m in self._installed_models):
+                self._notice(f"model '{self._active_chat_model}' is missing; please select a new one")
+                return
+
         session = self._session_manager.create_session()
         self._open_session(session.id, announce=True)
+        # self._active_chat_model is already set and will carry over
 
     def action_quit_request(self) -> None:
         import time
@@ -319,6 +469,16 @@ class AskWorkstationApp(App[None]):
             self._active_chat_model = arg
             self._status_message = f"model switched to {arg}"
             
+            # Persist globally
+            from ask.config import load_settings
+            current_settings = load_settings()
+            updated_settings = dataclasses.replace(current_settings, chat_model=arg)
+            save_user_settings(updated_settings)
+
+            # Persist to current session if possible
+            if self._memory is not None:
+                self._session_manager.save_session(self._session_id, metadata={"chat_model": arg})
+            
             # Check if the new model exists
             if self._installed_models and not any(m[0] == arg for m in self._installed_models):
                 self._add_system_line(f"warning: model '{arg}' does not appear to be installed")
@@ -344,6 +504,14 @@ class AskWorkstationApp(App[None]):
                 return
             self._backend.set_host(arg)
             self._notice(f"Ollama host updated: {self._backend.host}")
+            
+            # Persist globally
+            from ask.config import load_settings
+            current = load_settings()
+            # We create a new settings object with updated host
+            updated = dataclasses.replace(current, ollama_host=self._backend.host)
+            save_user_settings(updated)
+            
             self._refresh_ollama_status()
             return
         if command == "/new":
@@ -771,6 +939,12 @@ class AskWorkstationApp(App[None]):
         self._close_current_memory()
         self._session_id = session_id
         self._memory = self._session_manager.memory_for(session_id)
+        
+        # Load session-specific model if available
+        meta = self._memory.get_metadata()
+        if "chat_model" in meta:
+            self._active_chat_model = str(meta["chat_model"])
+        
         self._chat_lines = [
             ChatLine(role=message["role"], content=message["content"])
             for message in self._memory.get()
@@ -941,7 +1115,7 @@ class AskWorkstationApp(App[None]):
         table.add_row(Text("memory", style=MUTED), Text(self._memory_label(), style=BEIGE))
         table.add_row(Text("stream", style=MUTED), Text("active" if self._streaming else "idle", style=GREEN))
         table.add_row(Text("ollama", style=MUTED), Text(self._ollama_label(), style=self._ollama_style()))
-        table.add_row(Text("host", style=MUTED), Text(self._settings.ollama_host, style=BEIGE))
+        table.add_row(Text("host", style=MUTED), Text(self._backend.host, style=BEIGE))
         table.add_row(Text("session", style=MUTED), Text(self._session_id, style=BEIGE))
         table.add_row(Text("router", style=MUTED), Text("on" if self._router.enabled else "off", style=GREEN if self._router.enabled else MUTED))
         git_label = "on" if self._settings.git_enabled else "off"

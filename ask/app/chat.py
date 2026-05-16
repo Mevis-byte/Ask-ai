@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from ask.config import Settings
+import dataclasses
+
+from ask.config import Settings, save_user_settings
 from ask.memory import ChatMemory
 from ask.models import OllamaChatBackend
 from ask.plugins import PluginRegistry
@@ -63,6 +65,14 @@ class ChatApplication:
                 return
             self._active_chat_model = arg
             self._ui.print_model_switched(self._active_chat_model)
+            
+            # Persist globally
+            import dataclasses
+            updated = dataclasses.replace(self._settings, chat_model=arg)
+            save_user_settings(updated)
+            
+            # Persist per session
+            self._memory.set_metadata({"chat_model": arg})
             return
         if cmd == "/baseurl":
             if not arg:
@@ -70,6 +80,12 @@ class ChatApplication:
                 return
             self._backend.set_host(arg)
             self._ui.print_ollama_host_switched(self._backend.host)
+            
+            # Persist globally
+            import dataclasses
+            updated = dataclasses.replace(self._settings, ollama_host=self._backend.host)
+            save_user_settings(updated)
+
             # Auto-refresh models for the new host
             self._handle_slash_command("/models")
             return
@@ -81,6 +97,11 @@ class ChatApplication:
 
     def run(self) -> None:
         self._ui.print_chat_header()
+        
+        # Load model from memory metadata if available
+        meta = self._memory.get_metadata()
+        if "chat_model" in meta:
+            self._active_chat_model = str(meta["chat_model"])
         
         # Check model availability on startup
         try:
@@ -96,6 +117,8 @@ class ChatApplication:
             idx = self._ui.prompt_model_choice(len(available))
             self._active_chat_model = available[idx - 1][0]
             self._ui.print_model_switched(self._active_chat_model)
+            # Update the setting so it carries over if we were to reload config, 
+            # though here it just stays in self._active_chat_model for the session.
 
         import time
         import signal

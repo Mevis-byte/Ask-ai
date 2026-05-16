@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ask.config.defaults import BUILTIN_DEFAULTS
-from ask.config.json_file import read_config_file
+from ask.config.json_file import read_config_file, write_config_file
 from ask.config.merge import deep_merge
 from ask.config.paths import resolve_config_path
 
@@ -287,3 +287,30 @@ def load_settings() -> Settings:
         deep_merge(merged, read_config_file(path))
     _apply_env_overrides(merged)
     return _coerce_settings(merged)
+
+
+def save_user_settings(settings: Settings) -> None:
+    """Save user-changeable global settings back to the config file."""
+    path = resolve_config_path()
+    if path is None:
+        # Default user config path if none exists
+        path = Path.home() / ".config" / "ask" / "config.json"
+    
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing to preserve other settings (like UI styles)
+    data: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            data = read_config_file(path)
+        except Exception:
+            data = {}
+    
+    # Update only the models section for now as per user requirement
+    if "models" not in data:
+        data["models"] = {}
+    
+    data["models"]["ollama_host"] = settings.ollama_host
+    data["models"]["chat_model"] = settings.chat_model
+    
+    write_config_file(path, data)

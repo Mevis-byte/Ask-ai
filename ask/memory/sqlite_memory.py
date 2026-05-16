@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
+    metadata TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     saved_at TEXT
@@ -56,6 +58,7 @@ END;
 class ConversationSummary:
     id: str
     title: str
+    metadata: dict[str, Any]
     created_at: str
     updated_at: str
     saved_at: str | None
@@ -97,6 +100,13 @@ def _ensure_conversation_columns(conn: sqlite3.Connection) -> None:
             if _is_readonly_error(exc):
                 return
             raise
+    if "metadata" not in columns:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN metadata TEXT")
+        except sqlite3.OperationalError as exc:
+            if _is_readonly_error(exc):
+                return
+            raise
     if "saved_at" not in columns:
         try:
             conn.execute("ALTER TABLE conversations ADD COLUMN saved_at TEXT")
@@ -134,12 +144,14 @@ def list_conversations(db_path: Path) -> list[ConversationSummary]:
             return []
         columns = _conversation_columns(conn)
         title_expr = "COALESCE(NULLIF(c.title, ''), c.id)" if "title" in columns else "c.id"
+        meta_expr = "c.metadata" if "metadata" in columns else "'{}'"
         saved_expr = "c.saved_at" if "saved_at" in columns else "NULL"
         rows = conn.execute(
             f"""
             SELECT
                 c.id,
                 {title_expr} AS title,
+                {meta_expr} AS metadata,
                 c.created_at,
                 c.updated_at,
                 {saved_expr} AS saved_at,
@@ -150,17 +162,26 @@ def list_conversations(db_path: Path) -> list[ConversationSummary]:
             ORDER BY c.updated_at DESC, c.created_at DESC
             """
         ).fetchall()
-        return [
-            ConversationSummary(
-                id=str(row["id"]),
-                title=str(row["title"]),
-                created_at=str(row["created_at"]),
-                updated_at=str(row["updated_at"]),
-                saved_at=str(row["saved_at"]) if row["saved_at"] is not None else None,
-                message_count=int(row["message_count"]),
+        
+        results = []
+        for row in rows:
+            meta_raw = str(row["metadata"]) if row["metadata"] else "{}"
+            try:
+                meta = json.loads(meta_raw)
+            except Exception:
+                meta = {}
+            results.append(
+                ConversationSummary(
+                    id=str(row["id"]),
+                    title=str(row["title"]),
+                    metadata=meta,
+                    created_at=str(row["created_at"]),
+                    updated_at=str(row["updated_at"]),
+                    saved_at=str(row["saved_at"]) if row["saved_at"] is not None else None,
+                    message_count=int(row["message_count"]),
+                )
             )
-            for row in rows
-        ]
+        return results
     finally:
         conn.close()
 
@@ -170,6 +191,7 @@ def mark_conversation_saved(
     conversation_id: str,
     *,
     title: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     ensure_sqlite_memory_db(db_path)
     conn = sqlite3.connect(str(db_path))
@@ -179,20 +201,33 @@ def mark_conversation_saved(
             raise sqlite3.OperationalError("session metadata columns are unavailable")
         now = _utc_now()
         effective_title = title.strip() if title and title.strip() else _default_title(conversation_id)
+        
+        meta_json = json.dumps(metadata) if metadata is not None else None
+        
         conn.execute(
             """
-            INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, saved_at)
-            VALUES (?, ?, ?, ?, NULL)
+            INSERT OR IGNORE INTO conversations (id, title, metadata, created_at, updated_at, saved_at)
+            VALUES (?, ?, ?, ?, ?, NULL)
             """,
-            (conversation_id, effective_title, now, now),
+            (conversation_id, effective_title, meta_json, now, now),
         )
+        
+        updates = ["title = ?", "updated_at = ?", "saved_at = ?"]
+        params = [effective_title, now, now]
+        
+        if metadata is not None:
+            updates.append("metadata = ?")
+            params.append(meta_json)
+            
+        params.append(conversation_id)
+        
         conn.execute(
-            """
+            f"""
             UPDATE conversations
-            SET title = ?, updated_at = ?, saved_at = ?
+            SET {", ".join(updates)}
             WHERE id = ?
             """,
-            (effective_title, now, now, conversation_id),
+            tuple(params),
         )
         conn.commit()
     finally:
@@ -352,6 +387,27 @@ class SqliteChatMemory:
             (self._conversation_id,),
         )
         self._touch_conversation()
+        self._conn.commit()
+
+    def get_metadata(self) -> dict[str, Any]:
+        cur = self._conn.execute(
+            "SELECT metadata FROM conversations WHERE id = ?",
+            (self._conversation_id,),
+        )
+        row = cur.fetchone()
+        if not row or not row["metadata"]:
+            return {}
+        try:
+            return json.loads(row["metadata"])
+        except Exception:
+            return {}
+
+    def set_metadata(self, metadata: dict[str, Any]) -> None:
+        raw = json.dumps(metadata)
+        self._conn.execute(
+            "UPDATE conversations SET metadata = ?, updated_at = ? WHERE id = ?",
+            (raw, _utc_now(), self._conversation_id),
+        )
         self._conn.commit()
 
     def _recent_message_ids(self, limit: int) -> list[int]:

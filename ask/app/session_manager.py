@@ -18,6 +18,7 @@ from ask.memory import (
 class SessionInfo:
     id: str
     title: str
+    metadata: dict[str, Any]
     created_at: str
     updated_at: str
     saved_at: str | None
@@ -28,6 +29,7 @@ class SessionInfo:
 @dataclass
 class _RamSession:
     title: str
+    metadata: dict[str, Any]
     created_at: str
     updated_at: str
     saved_at: str | None
@@ -88,14 +90,18 @@ class ChatSessionManager:
         *,
         session_id: str | None = None,
         title: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> SessionInfo:
         sid = session_id or _new_session_id()
         label = title or "Untitled Session"
+        meta = metadata or {}
         if self._path is None:
             now = _utc_now()
             memory = InMemoryChatMemory(max_messages=self._settings.memory_max_messages)
+            memory.set_metadata(meta)
             self._ram_sessions[sid] = _RamSession(
                 title=label,
+                metadata=meta,
                 created_at=now,
                 updated_at=now,
                 saved_at=None,
@@ -104,6 +110,7 @@ class ChatSessionManager:
             return self._ram_info(sid, self._ram_sessions[sid])
 
         memory = self.memory_for(sid)
+        memory.set_metadata(meta)
         close = getattr(memory, "close", None)
         if callable(close):
             close()
@@ -133,6 +140,7 @@ class ChatSessionManager:
             SessionInfo(
                 id=item.id,
                 title=item.title,
+                metadata=item.metadata,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
                 saved_at=item.saved_at,
@@ -142,7 +150,7 @@ class ChatSessionManager:
             for item in list_conversations(self._path)
         ]
 
-    def save_session(self, session_id: str, *, title: str | None = None) -> SessionInfo:
+    def save_session(self, session_id: str, *, title: str | None = None, metadata: dict[str, Any] | None = None) -> SessionInfo:
         if self._path is None:
             now = _utc_now()
             if session_id not in self._ram_sessions:
@@ -150,9 +158,20 @@ class ChatSessionManager:
             meta = self._ram_sessions[session_id]
             if title and title.strip():
                 meta.title = title.strip()
+            if metadata is not None:
+                meta.metadata.update(metadata)
+                meta.memory.set_metadata(meta.metadata)
             meta.updated_at = now
             meta.saved_at = now
             return self._ram_info(session_id, meta)
+
+        if metadata is not None:
+            memory = self.memory_for(session_id)
+            existing = memory.get_metadata()
+            existing.update(metadata)
+            memory.set_metadata(existing)
+            if hasattr(memory, "close"):
+                memory.close()
 
         mark_conversation_saved(self._path, session_id, title=title)
         return self._session_info_for_id(session_id, fallback_title=title or "Untitled Session")
