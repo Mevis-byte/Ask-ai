@@ -165,7 +165,7 @@ python -m ask.main ai
 or:
 
 ```bash
-ask ai
+askai (recommended)
 ```
 
 ---
@@ -174,14 +174,12 @@ ask ai
 
 | Command              | Description           |
 | -------------------- | --------------------- |
-| `ask ai`             | Launch workstation UI |
-| `ask chat`           | Start AI chat session |
-| `ask analyze <file>` | Analyze source code   |
+| `askai`              | Launch workstation UI |
 | `/read <file>`       | Display file contents |
 | `/explain <file>`    | Explain file logic    |
 | `/review <file>`     | Review code quality   |
 | `/summarize <file>`  | Summarize file        |
-
+| `/help               | Display all cmds      |
 ---
 
 # Project Structure
