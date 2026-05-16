@@ -8,6 +8,20 @@ Built on top of Ollama and local LLMs, ask.ai runs completely offline, supports 
 
 ---
 
+# Documentation
+
+Detailed documentation is available in the [`docs/`](./docs/) directory:
+
+| File | Description |
+|------|-------------|
+| [OVERVIEW.md](./docs/OVERVIEW.md) | High-level overview and feature summary |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System architecture and design decisions |
+| [COMMANDS.md](./docs/COMMANDS.md) | Complete command reference |
+| [CONFIGURATION.md](./docs/CONFIGURATION.md) | All configuration options and env variables |
+| [SETUP.md](./docs/SETUP.md) | Installation and troubleshooting guide |
+
+---
+
 # Preview
 
 ## Neural Workstation UI
@@ -252,16 +266,6 @@ askai (recommended)
 
 # Commands
 
-<<<<<<< HEAD
-| Command              | Description           |
-| -------------------- | --------------------- |
-| `askai`              | Launch workstation UI |
-| `/read <file>`       | Display file contents |
-| `/explain <file>`    | Explain file logic    |
-| `/review <file>`     | Review code quality   |
-| `/summarize <file>`  | Summarize file        |
-| `/help               | Display all cmds      |
-=======
 | Command                 | Description                     |
 | ----------------------- | ------------------------------- |
 | `ask ai`                | Launch workstation UI           |
@@ -282,9 +286,6 @@ askai (recommended)
 | `/generate-commit`      | AI generates commit message     |
 | `/sessions`             | List saved sessions             |
 | `/session <id\|num>`   | Switch to a session             |
-| `/resume <id\|num>`    | Alias for /session              |
-| `/new`                  | Create new session              |
-| `/save [title]`         | Mark session saved              |
 | `/model <name>`         | Switch AI model                 |
 | `/models`               | List installed models           |
 | `/copy`                 | Copy last response to clipboard |
@@ -292,8 +293,7 @@ askai (recommended)
 | `/save-file <path>`     | Save last response to file      |
 | `/export`               | Export full session as markdown |
 | `/clear`                | Clear session transcript        |
-
->>>>>>> 247ad6e (Added workspace context, RAG, plugins, and system improvements)
+| `/help`                 | Display all commands            |
 ---
 
 # Project Structure
@@ -449,13 +449,7 @@ export ASK_GIT_ENABLED=true
 
 # Roadmap
 
-Future plans:
-
-* Autonomous task mode
-* Voice assistant mode
-* Better Textual UI navigation
-* Local embeddings for RAG chunking
-* Multi-session workspace persistence
+See [ROADMAP.md](./ROADMAP.md) for planned features and future direction.
 
 ---
 
@@ -470,6 +464,8 @@ ask.ai is designed with a local-first workflow.
 
 Current implementation is read-focused and avoids unrestricted system modification.
 
+See [SECURITY.md](./SECURITY.md) for the full security policy.
+
 ---
 
 # Screenshots
@@ -482,16 +478,7 @@ Current implementation is read-focused and avoids unrestricted system modificati
 
 # Contributing
 
-Contributions, ideas, and improvements are welcome.
-
-Possible areas:
-
-* UI improvements
-* Textual layouts
-* plugin system
-* memory improvements
-* performance optimization
-* model integrations
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide on how to get started.
 
 ---
 

@@ -7,6 +7,7 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+env/
 
 # Build files
 build/
@@ -18,11 +19,29 @@ dist/
 
 # SQLite / local memory
 *.sqlite
+*.sqlite3
 *.db
 
-# VS Code
+# Vector databases / RAG indexes
+chroma_db/
+.rag_index/
+ask/rag_index/
+
+# Cache directories
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Documentation build
+site/
