@@ -106,7 +106,6 @@ class ChatApplication:
             api_messages.append({"role": "user", "content": turn_user})
 
             self._ui.print_response_label()
-            self._ui.print_stream_prelude()
 
             stream = self._backend.chat(
                 model=self._active_chat_model,
@@ -119,7 +118,7 @@ class ChatApplication:
             else:
                 with self._ui.thinking("BUFFERING RESPONSE …"):
                     full = collect_stream_text(stream)
-                self._ui.print_markdown(full)
+                self._ui.print_plain(full)
 
             self._memory.append({"role": "user", "content": base_user})
             self._memory.append({"role": "assistant", "content": full})

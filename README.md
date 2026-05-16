@@ -30,6 +30,7 @@ Built on top of Ollama and local LLMs, ask.ai runs completely offline, supports 
 * Token-by-token streaming responses
 * Smooth terminal interaction
 * Fast response rendering
+* Plain-text output — fully selectable and copyable
 
 ## Multi-Model Support
 
@@ -41,6 +42,30 @@ Examples:
 * deepseek-coder
 * mistral
 * codellama
+
+## Model Router
+
+Automatically selects the best model for each task:
+
+| Task       | Default Model          |
+|------------|------------------------|
+| Coding     | `deepseek-coder:6.7b`  |
+| Chat       | `llama3`               |
+| Summary    | `mistral`              |
+
+Configure in `config.json` or via environment variables (`ASK_ROUTER_*`).
+
+## Workspace Context System
+
+Load an entire project folder as read-only context for the AI:
+
+```bash
+/workspace ./src
+/context            # show current context summary
+/clear-context      # clear loaded workspace
+```
+
+ask.ai recursively scans project files, ignores `.git`, `node_modules`, `venv`, `__pycache__`, `dist`, `build`, and skips binary/sensitive files.
 
 ## File Intelligence
 
@@ -60,12 +85,55 @@ Supported workflows:
 /summarize config.yaml
 ```
 
-## Local Memory System
+## Local RAG / Semantic Search
 
-* Persistent chat history
-* SQLite-based memory
-* Session tracking
-* Local conversation storage
+Local vector search over project files using ChromaDB + sentence-transformers:
+
+```bash
+/workspace ./src        # index project files
+"Where is auth implemented?"   # semantic search over indexed files
+```
+
+* Fully offline
+* Persistent vector database
+* Sentence embeddings for semantic understanding
+* Configure via `config.json` (`rag.enabled`, `rag.embedding_model`, etc.)
+
+## Git Integration
+
+Safe, read-only git operations from within the workstation:
+
+```bash
+/git-status         # working tree status
+/git-diff           # unstaged diff
+/git-log            # recent commits
+/explain-commit     # AI explains staged changes
+/generate-commit    # AI generates commit message from diff
+```
+
+No destructive git commands are exposed.
+
+## Session Memory System
+
+* Persistent chat history (SQLite)
+* Session tracking with metadata
+* Session listing and switching
+* Session save/resume
+
+```bash
+/sessions           # list all sessions
+/session <id>       # switch to a session
+/resume <id>        # alias for /session
+/new                # create new session
+/save [title]       # save current session
+```
+
+## Export & Copy
+
+* `/copy` — copy last AI response to clipboard
+* `/print` — print last response to terminal scrollback (selectable)
+* `/save-file <path>` — save last response to a file
+* `/export` — export full session as markdown
 
 ## Syntax Highlighting
 
@@ -76,25 +144,29 @@ Supported workflows:
 ## Workstation UI
 
 * Terminal-based interface
-* Structured panels
-* Status indicators
+* Three-pane layout (sessions, chat, settings)
+* Status indicators (model, memory, Ollama, git, context)
 * Session management
 * Retro workstation-inspired layout
+* Clipboard copy (Ctrl+Y)
+* Selectable text output
 
 ---
 
 # Tech Stack
 
-| Component          | Technology                 |
-| ------------------ | -------------------------- |
-| AI Backend         | Ollama                     |
-| Models             | LLaMA 3, DeepSeek, Mistral |
-| Language           | Python                     |
-| CLI Framework      | Typer                      |
-| Terminal Rendering | Rich                       |
-| TUI System         | Textual                    |
-| Local Database     | SQLite                     |
-| Packaging          | setuptools                 |
+| Component              | Technology                 |
+| ---------------------- | -------------------------- |
+| AI Backend             | Ollama                     |
+| Models                 | LLaMA 3, DeepSeek, Mistral |
+| Language               | Python                     |
+| CLI Framework          | Typer                      |
+| Terminal Rendering     | Rich                       |
+| TUI System             | Textual                    |
+| Vector Database        | ChromaDB                   |
+| Embeddings             | sentence-transformers      |
+| Local Database         | SQLite / FTS5              |
+| Packaging              | setuptools                 |
 
 ---
 
@@ -131,6 +203,14 @@ venv\Scripts\activate
 
 ```bash
 pip install -r requirements.txt
+```
+
+For RAG / semantic search (optional):
+
+```bash
+pip install ask[rag]
+# or
+pip install chromadb sentence-transformers
 ```
 
 ---
@@ -172,6 +252,7 @@ askai (recommended)
 
 # Commands
 
+<<<<<<< HEAD
 | Command              | Description           |
 | -------------------- | --------------------- |
 | `askai`              | Launch workstation UI |
@@ -180,30 +261,102 @@ askai (recommended)
 | `/review <file>`     | Review code quality   |
 | `/summarize <file>`  | Summarize file        |
 | `/help               | Display all cmds      |
+=======
+| Command                 | Description                     |
+| ----------------------- | ------------------------------- |
+| `ask ai`                | Launch workstation UI           |
+| `ask chat`              | Start plain-terminal chat (selectable output) |
+| `ask analyze <file>`    | Analyze source code             |
+| `/workspace <dir>`      | Load project folder as context  |
+| `/context`              | Show current workspace summary  |
+| `/clear-context`        | Clear loaded workspace context  |
+| `/read <file>`          | Display file contents           |
+| `/explain <file>`       | Explain file logic              |
+| `/review <file>`        | Review code quality             |
+| `/summarize <file>`     | Summarize file                  |
+| `/find <pattern>`       | Search context for pattern      |
+| `/git-status`           | Show working tree status        |
+| `/git-diff [file]`      | Show unstaged diff              |
+| `/git-log [n]`          | Show recent commits             |
+| `/explain-commit`       | AI explains staged changes      |
+| `/generate-commit`      | AI generates commit message     |
+| `/sessions`             | List saved sessions             |
+| `/session <id\|num>`   | Switch to a session             |
+| `/resume <id\|num>`    | Alias for /session              |
+| `/new`                  | Create new session              |
+| `/save [title]`         | Mark session saved              |
+| `/model <name>`         | Switch AI model                 |
+| `/models`               | List installed models           |
+| `/copy`                 | Copy last response to clipboard |
+| `/print`                | Print response to scrollback    |
+| `/save-file <path>`     | Save last response to file      |
+| `/export`               | Export full session as markdown |
+| `/clear`                | Clear session transcript        |
+
+>>>>>>> 247ad6e (Added workspace context, RAG, plugins, and system improvements)
 ---
 
 # Project Structure
 
 ```text
 ask/
-├── app/
-│   ├── chat.py
-│   ├── workstation.py
-│   └── session_manager.py
+├── app/              # Application layer
+│   ├── chat.py            # REPL chat loop
+│   ├── workstation.py     # Textual app builder
+│   ├── session_manager.py # Session CRUD
+│   ├── analysis.py        # File analysis
+│   └── bootstrap.py       # DI container
 │
-├── memory/
-│   ├── sqlite_memory.py
-│   └── factory.py
+├── config/           # Configuration
+│   ├── defaults.py        # Built-in defaults
+│   ├── settings.py        # Settings dataclass + loader
+│   ├── json_file.py       # JSON config reader
+│   ├── merge.py           # Recursive dict merge
+│   └── paths.py           # Config file resolution
 │
-├── tools/
-│   ├── file_reader.py
-│   ├── analyzer.py
-│   └── context_loader.py
+├── memory/           # Conversation memory
+│   ├── protocol.py        # ChatMemory protocol
+│   ├── types.py           # ChatMessage TypedDict
+│   ├── in_memory.py       # In-memory store
+│   ├── sqlite_memory.py   # SQLite + FTS5
+│   └── factory.py         # Memory factory
 │
-├── ui/
-│   └── workstation.py
+├── models/           # AI model layer
+│   ├── protocols.py       # ChatBackend protocol
+│   ├── ollama_backend.py  # Ollama client
+│   └── router.py          # Task-based model router
 │
-└── main.py
+├── rag/              # Retrieval-Augmented Generation
+│   ├── base.py            # Document + Retriever protocol
+│   ├── chroma_retriever.py # ChromaDB vector retriever
+│   ├── factory.py         # Retriever factory
+│   ├── injection.py       # Context injection
+│   └── none_retriever.py  # No-op default
+│
+├── plugins/          # Plugin system
+│   ├── base.py            # Plugin base class
+│   ├── registry.py        # Plugin registry
+│   └── git/               # Git integration plugin
+│       ├── __init__.py
+│       └── plugin.py
+│
+├── files/            # File system access
+│   ├── local_context.py   # Bounded file I/O + context
+│   └── __init__.py
+│
+├── tools/            # File analysis tools
+│   └── files.py           # Language detection, prompts
+│
+├── streaming/        # Stream processing
+│   └── pipeline.py        # Token iteration, accumulation
+│
+├── ui/               # User interfaces
+│   ├── console_ui.py      # Rich-based REPL
+│   ├── workstation.py     # Textual TUI
+│   ├── theme.py           # Color palette
+│   └── startup.py         # Boot animation
+│
+└── main.py           # CLI entrypoint (Typer)
 ```
 
 ---
@@ -227,19 +380,82 @@ The goal is to create a local AI workstation that integrates naturally into term
 
 ---
 
+# Configuration
+
+ask.ai uses a layered configuration system:
+
+1. **Built-in defaults** — sensible defaults for all settings
+2. **`config.json`** — user config file (in `~/.config/ask/config.json` or `./config.json`)
+3. **Environment variables** — `ASK_*` overrides (12-factor style)
+
+## config.json sections
+
+```json
+{
+  "models": {
+    "ollama_host": "http://127.0.0.1:11434",
+    "chat_model": "llama3",
+    "analyze_model": "deepseek-coder:6.7b"
+  },
+  "rag": {
+    "enabled": false,
+    "top_k": 4,
+    "embedding_model": "all-MiniLM-L6-v2",
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "persist_directory": "~/.local/share/ask/rag_index"
+  },
+  "router": {
+    "enabled": false,
+    "default_model": "llama3",
+    "coding_model": "deepseek-coder:6.7b",
+    "chat_model": "llama3",
+    "summary_model": "mistral"
+  },
+  "git": {
+    "enabled": true,
+    "max_diff_lines": 200
+  },
+  "memory": {
+    "max_messages": 80,
+    "persist_path": "~/.local/share/ask/chat.sqlite",
+    "context_search_enabled": true,
+    "context_search_top_k": 6,
+    "context_exclude_recent_messages": 24
+  },
+  "streaming": {
+    "live_markdown": true,
+    "refresh_per_second": 20
+  },
+  "ui": {
+    "banner_font": "slant",
+    "banner_title": "ASK AI",
+    "banner_subtitle": "Offline Developer AI Assistant",
+    "startup_animation": true,
+    "typing_delay_ms": 8
+  }
+}
+```
+
+Override any setting via environment variables:
+
+```bash
+export ASK_OLLAMA_HOST=http://localhost:11434
+export ASK_CHAT_MODEL=llama3
+export ASK_RAG_ENABLED=true
+export ASK_ROUTER_ENABLED=true
+export ASK_GIT_ENABLED=true
+```
+
 # Roadmap
 
-Planned features:
+Future plans:
 
-* Workspace-wide project context
-* Plugin system
 * Autonomous task mode
-* Local RAG/document search
 * Voice assistant mode
-* Better session management
-* Git integration
-* Local embeddings support
-* Improved Textual UI
+* Better Textual UI navigation
+* Local embeddings for RAG chunking
+* Multi-session workspace persistence
 
 ---
 

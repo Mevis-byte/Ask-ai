@@ -12,6 +12,10 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "rag": {
         "enabled": False,
         "top_k": 4,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "chunk_size": 512,
+        "chunk_overlap": 64,
+        "persist_directory": "~/.local/share/ask/rag_index",
     },
     "streaming": {
         "live_markdown": True,
@@ -23,6 +27,21 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "context_search_enabled": True,
         "context_search_top_k": 6,
         "context_exclude_recent_messages": 24,
+    },
+    "router": {
+        "enabled": False,
+        "default_model": "llama3",
+        "coding_model": "deepseek-coder:6.7b",
+        "chat_model": "llama3",
+        "summary_model": "mistral",
+    },
+    "git": {
+        "enabled": True,
+        "max_diff_lines": 200,
+    },
+    "workspace": {
+        "max_file_bytes": 262144,
+        "max_prompt_chars": 36000,
     },
     "ui": {
         "banner_font": "slant",

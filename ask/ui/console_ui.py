@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -8,8 +9,7 @@ from typing import Iterator
 
 from pyfiglet import Figlet
 from rich import print as rprint
-from rich.console import Console, RenderableType
-from rich.live import Live
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -250,16 +250,6 @@ class ConsoleUI:
             Rule(f"[bold {T.MAGENTA}]▶ {label}[/]", characters="═─", style=T.MAGENTA)
         )
 
-    def print_stream_prelude(self) -> None:
-        self._console.print(
-            Panel(
-                Text("synthesizing token stream …", style=f"italic {T.DIM}"),
-                border_style=T.DIM,
-                title=f"[{T.DIM}]◆ CHANNEL[/]",
-                padding=(0, 1),
-            )
-        )
-
     def print_markdown(self, text: str) -> None:
         self._console.print(
             Panel(
@@ -272,49 +262,23 @@ class ConsoleUI:
 
     def stream_markdown_live(self, text_deltas: Iterable[str]) -> str:
         buffer: list[str] = []
-        rps = self._settings.stream_refresh_per_second
         delay = max(0.0, self._settings.ui_typing_delay_ms / 1000.0)
 
-        def render_body() -> RenderableType:
-            raw = "".join(buffer)
-            return Markdown(raw) if raw.strip() else Text("…", style=T.DIM)
-
-        def iter_chunks() -> Iterator[str]:
-            for delta in text_deltas:
-                if delay <= 0:
-                    yield delta
-                else:
-                    for ch in delta:
-                        yield ch
-
-        with Live(
-            Panel(
-                render_body(),
-                title=f"[{T.TITLE}]◆ NEUROLINK STREAM[/]",
-                border_style=T.CYAN,
-                padding=(1, 2),
-            ),
-            console=self._console,
-            refresh_per_second=rps,
-            transient=False,
-            vertical_overflow="visible",
-        ) as live:
-            for chunk in iter_chunks():
-                buffer.append(chunk)
-                live.update(
-                    Panel(
-                        render_body(),
-                        title=f"[{T.TITLE}]◆ NEUROLINK STREAM[/]",
-                        border_style=T.CYAN,
-                        padding=(1, 2),
-                    )
-                )
-                if delay > 0:
+        for delta in text_deltas:
+            if delay <= 0:
+                sys.stdout.write(delta)
+                buffer.append(delta)
+            else:
+                for ch in delta:
+                    sys.stdout.write(ch)
+                    buffer.append(ch)
                     time.sleep(delay)
+            sys.stdout.flush()
 
-        text = "".join(buffer)
-        self._console.print()
-        return text
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+        return "".join(buffer)
 
     def print_plain(self, text: str, *, end: str = "\n") -> None:
         self._console.print(text, end=end, highlight=False)

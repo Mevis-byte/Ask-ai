@@ -33,16 +33,10 @@ def ai() -> None:
 
 @app.command()
 def chat() -> None:
-    """Start the Textual chat workstation directly."""
+    """Start a plain-terminal AI chat session (selectable output)."""
     settings = load_settings()
-    try:
-        from ask.app.workstation import run_default_workstation
-    except ModuleNotFoundError as exc:
-        if exc.name == "textual":
-            typer.echo("Textual is required for the workstation UI. Install project dependencies first.")
-            raise typer.Exit(1) from exc
-        raise
-    run_default_workstation(settings)
+    from ask.app.bootstrap import build_default_chat_app
+    build_default_chat_app(settings).run()
 
 
 if __name__ == "__main__":

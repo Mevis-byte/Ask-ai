@@ -115,6 +115,42 @@ def _apply_env_overrides(cfg: dict[str, Any]) -> None:
     if vf is not None:
         cfg["ui"]["typing_delay_ms"] = vf
 
+    b = _env_bool("ASK_RAG_ENABLED")
+    if b is not None:
+        cfg["rag"]["enabled"] = b
+    v = _env_str("ASK_RAG_EMBEDDING_MODEL")
+    if v is not None:
+        cfg["rag"]["embedding_model"] = v
+    vi = _env_opt_int("ASK_RAG_CHUNK_SIZE")
+    if vi is not None:
+        cfg["rag"]["chunk_size"] = vi
+    v = _env_str("ASK_RAG_PERSIST_DIR")
+    if v is not None:
+        cfg["rag"]["persist_directory"] = v
+
+    b = _env_bool("ASK_ROUTER_ENABLED")
+    if b is not None:
+        cfg["router"]["enabled"] = b
+    v = _env_str("ASK_ROUTER_DEFAULT_MODEL")
+    if v is not None:
+        cfg["router"]["default_model"] = v
+    v = _env_str("ASK_ROUTER_CODING_MODEL")
+    if v is not None:
+        cfg["router"]["coding_model"] = v
+    v = _env_str("ASK_ROUTER_CHAT_MODEL")
+    if v is not None:
+        cfg["router"]["chat_model"] = v
+    v = _env_str("ASK_ROUTER_SUMMARY_MODEL")
+    if v is not None:
+        cfg["router"]["summary_model"] = v
+
+    b = _env_bool("ASK_GIT_ENABLED")
+    if b is not None:
+        cfg["git"]["enabled"] = b
+    vi = _env_opt_int("ASK_GIT_MAX_DIFF_LINES")
+    if vi is not None:
+        cfg["git"]["max_diff_lines"] = vi
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -125,6 +161,10 @@ class Settings:
     analyze_model: str
     rag_enabled: bool
     rag_top_k: int
+    rag_embedding_model: str
+    rag_chunk_size: int
+    rag_chunk_overlap: int
+    rag_persist_directory: str
     chat_live_stream: bool
     stream_refresh_per_second: float
     memory_max_messages: int | None
@@ -142,6 +182,13 @@ class Settings:
     ui_response_label: str
     ui_startup_animation: bool
     ui_typing_delay_ms: float
+    router_enabled: bool
+    router_default_model: str
+    router_coding_model: str
+    router_chat_model: str
+    router_summary_model: str
+    git_enabled: bool
+    git_max_diff_lines: int
 
 
 def _coerce_settings(cfg: dict[str, Any]) -> Settings:
@@ -193,12 +240,19 @@ def _coerce_settings(cfg: dict[str, Any]) -> Settings:
     if typing_ms > 80:
         typing_ms = 80.0
 
+    router = cfg.get("router", {})
+    git = cfg.get("git", {})
+
     return Settings(
         ollama_host=str(models["ollama_host"]),
         chat_model=str(models["chat_model"]),
         analyze_model=str(models["analyze_model"]),
         rag_enabled=bool(rag["enabled"]),
         rag_top_k=rag_top,
+        rag_embedding_model=str(rag.get("embedding_model", "all-MiniLM-L6-v2")),
+        rag_chunk_size=int(rag.get("chunk_size", 512)),
+        rag_chunk_overlap=int(rag.get("chunk_overlap", 64)),
+        rag_persist_directory=str(rag.get("persist_directory", "~/.local/share/ask/rag_index")),
         chat_live_stream=bool(streaming["live_markdown"]),
         stream_refresh_per_second=rps,
         memory_max_messages=max_msg,
@@ -216,6 +270,13 @@ def _coerce_settings(cfg: dict[str, Any]) -> Settings:
         ui_response_label=str(ui["response_label"]),
         ui_startup_animation=bool(ui.get("startup_animation", True)),
         ui_typing_delay_ms=typing_ms,
+        router_enabled=bool(router.get("enabled", False)),
+        router_default_model=str(router.get("default_model", "llama3")),
+        router_coding_model=str(router.get("coding_model", "deepseek-coder:6.7b")),
+        router_chat_model=str(router.get("chat_model", "llama3")),
+        router_summary_model=str(router.get("summary_model", "mistral")),
+        git_enabled=bool(git.get("enabled", True)),
+        git_max_diff_lines=int(git.get("max_diff_lines", 200)),
     )
 
 

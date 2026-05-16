@@ -6,7 +6,22 @@
   },
   "rag": {
     "enabled": false,
-    "top_k": 4
+    "top_k": 4,
+    "embedding_model": "all-MiniLM-L6-v2",
+    "chunk_size": 512,
+    "chunk_overlap": 64,
+    "persist_directory": "~/.local/share/ask/rag_index"
+  },
+  "router": {
+    "enabled": false,
+    "default_model": "llama3",
+    "coding_model": "deepseek-coder:6.7b",
+    "chat_model": "llama3",
+    "summary_model": "mistral"
+  },
+  "git": {
+    "enabled": true,
+    "max_diff_lines": 200
   },
   "streaming": {
     "live_markdown": true,

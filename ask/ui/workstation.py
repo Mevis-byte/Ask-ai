@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +28,8 @@ from ask.files import (
 )
 from ask.memory import ChatMemory
 from ask.models import OllamaChatBackend
-from ask.plugins import PluginRegistry
+from ask.models.router import ModelRouter
+from ask.plugins import GitPlugin, PluginRegistry
 from ask.rag import Retriever, augment_user_message
 from ask.streaming import iter_ollama_text_deltas
 from ask.tools import (
@@ -148,6 +152,7 @@ class AskWorkstationApp(App[None]):
     BINDINGS = [
         Binding("ctrl+n", "new_session", "New Session"),
         Binding("ctrl+s", "save_session", "Save Session"),
+        Binding("ctrl+y", "copy_last_response", "Copy Last Response"),
         Binding("tab", "focus_next_pane", "Switch Pane"),
         Binding("ctrl+c", "quit", "Exit"),
     ]
@@ -185,6 +190,14 @@ class AskWorkstationApp(App[None]):
         self._status_message = "ready"
         self._focus_order = ["sessions-pane", "chat-pane", "settings-pane", "command-input"]
         self._focus_index = 3
+        self._router = ModelRouter(
+            enabled=settings.router_enabled,
+            default_model=settings.router_default_model,
+            coding_model=settings.router_coding_model,
+            chat_model=settings.router_chat_model,
+            summary_model=settings.router_summary_model,
+        )
+        self._git = GitPlugin(max_diff_lines=settings.git_max_diff_lines)
 
     def compose(self) -> ComposeResult:
         yield Static("ASK.AI // LOCAL WORKSTATION // OLLAMA TERMINAL OS", id="topbar")
@@ -207,7 +220,17 @@ class AskWorkstationApp(App[None]):
         self.set_interval(30, self._refresh_ollama_status)
 
     def on_unmount(self) -> None:
+        lines = self._format_exit_transcript()
         self._close_current_memory()
+        out = sys.__stdout__
+        try:
+            out.write("\n")
+            for line in lines:
+                out.write(line)
+            out.write("\n")
+            out.flush()
+        except OSError:
+            pass
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
@@ -243,21 +266,37 @@ class AskWorkstationApp(App[None]):
             self._add_system_line(
                 "\n".join(
                     [
-                        "commands:",
-                        "/model <name>       switch active Ollama model",
-                        "/models             refresh installed model list",
-                        "/new                create a new session",
-                        "/save [title]       mark current session saved",
-                        "/sessions           show session identifiers",
-                        "/session <id|num>   switch session",
-                        "/context <folder>   set read-only project context",
-                        "/read <file>        display raw file with syntax highlighting",
-                        "/explain <file>     explain file architecture and logic",
-                        "/summarize <file>   short file overview",
-                        "/review <file>      code review for risks and improvements",
-                        "/find <pattern>     search active context and attach matches",
-                        "/clear              clear current session transcript",
-                        "keys: Ctrl+N new, Ctrl+S save, Tab switch panes, Ctrl+C exit",
+                        "── workspace ──",
+                        "/workspace <dir>   load project folder as context",
+                        "/context           show current context summary",
+                        "/clear-context     clear loaded workspace context",
+                        "/read <file>       display raw file with syntax highlighting",
+                        "/explain <file>    explain file architecture and logic",
+                        "/summarize <file>  short file overview",
+                        "/review <file>     code review for risks and improvements",
+                        "/find <pattern>    search active context and attach matches",
+                        "── git ──",
+                        "/git-status        show working tree status",
+                        "/git-diff [file]   show unstaged diff",
+                        "/git-log [n]       show recent commits (default: 10)",
+                        "/explain-commit    AI explanation of staged changes",
+                        "/generate-commit   AI-generated commit message from diff",
+                        "── sessions ──",
+                        "/new               create a new session",
+                        "/save [title]      mark current session saved",
+                        "/sessions          list saved sessions",
+                        "/session <id|num>  switch to a session",
+                        "/resume <id|num>   alias for /session",
+                        "/clear             clear current session transcript",
+                        "── export ──",
+                        "/save-file <path>  save last response to a file",
+                        "/export            export full session as markdown",
+                        "/copy              copy last AI response to clipboard",
+                        "/print             print last response to terminal (selectable)",
+                        "── model ──",
+                        "/model <name>      switch active Ollama model",
+                        "/models            refresh installed model list",
+                        "keys: Ctrl+N new, Ctrl+S save, Ctrl+Y copy, Tab panes, Ctrl+C exit",
                     ]
                 )
             )
@@ -290,8 +329,12 @@ class AskWorkstationApp(App[None]):
                 return
             self._switch_session_from_arg(arg)
             return
-        if command == "/context":
+        if command in ("/context", "/workspace"):
             self._handle_context_command(arg)
+            return
+        if command in ("/clear-context", "/clear-workspace"):
+            self._file_context.clear()
+            self._add_system_line("workspace context cleared")
             return
         if command == "/read":
             self._handle_read_command(arg)
@@ -308,6 +351,33 @@ class AskWorkstationApp(App[None]):
         if command == "/find":
             self._handle_find_command(arg)
             return
+        if command == "/git-status":
+            self._handle_git_status()
+            return
+        if command == "/git-diff":
+            self._handle_git_diff(arg)
+            return
+        if command == "/git-log":
+            self._handle_git_log(arg)
+            return
+        if command == "/explain-commit":
+            self._handle_git_explain_commit()
+            return
+        if command == "/generate-commit":
+            self._handle_git_generate_commit()
+            return
+        if command in ("/save-file", "/save-response"):
+            self._handle_save_response(arg)
+            return
+        if command == "/export":
+            self._handle_export_session()
+            return
+        if command == "/resume":
+            if not arg:
+                self._add_system_line("usage: /resume <id|number>")
+                return
+            self._switch_session_from_arg(arg)
+            return
         if command == "/clear":
             if self._memory is not None:
                 self._memory.clear()
@@ -315,7 +385,154 @@ class AskWorkstationApp(App[None]):
             self._status_message = "session transcript cleared"
             self._refresh_all()
             return
+        if command in ("/copy", "/copy-last"):
+            self.action_copy_last_response()
+            return
+        if command == "/print":
+            self._print_last_response()
+            return
         self._add_system_line(f"unknown command: {command}")
+
+    def _handle_git_status(self) -> None:
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        if not self._git.is_available:
+            self._notice("git is not installed on this system")
+            return
+        try:
+            out = self._git.status()
+        except Exception as exc:
+            self._notice(f"git status failed: {exc}")
+            return
+        self._add_system_line("working tree status:" if out else "clean working tree")
+        if out:
+            self._add_system_line(out)
+
+    def _handle_git_diff(self, pathspec: str) -> None:
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        if not self._git.is_available:
+            self._notice("git is not installed on this system")
+            return
+        try:
+            out = self._git.diff(pathspec=pathspec or None)
+        except Exception as exc:
+            self._notice(f"git diff failed: {exc}")
+            return
+        self._add_system_line("diff:" if out else "no unstaged changes")
+        if out:
+            self._add_system_line(out)
+
+    def _handle_git_log(self, arg: str) -> None:
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        try:
+            n = int(arg) if arg.isdigit() and int(arg) > 0 else 10
+            out = self._git.log_pretty(max_count=n)
+        except Exception as exc:
+            self._notice(f"git log failed: {exc}")
+            return
+        self._add_system_line("recent commits:" if out else "no commits found")
+        if out:
+            self._add_system_line(out)
+
+    def _handle_git_explain_commit(self) -> None:
+        if self._streaming:
+            self._notice("stream active; wait for the assistant to finish")
+            return
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        try:
+            diff_text = self._git.diff(staged=True, pathspec=None)
+        except Exception as exc:
+            diff_text = ""
+            self._notice(f"git diff failed: {exc}")
+        if not diff_text or diff_text == "no unstaged changes":
+            try:
+                diff_text = self._git.diff(staged=False, pathspec=None)
+            except Exception as exc:
+                self._notice(f"no staged changes and unstaged diff failed: {exc}")
+                return
+            if not diff_text or diff_text == "no unstaged changes":
+                self._notice("no changes to explain")
+                return
+        prompt = (
+            "Explain the following code changes in a concise way. "
+            "Describe what each change does and why it might be needed.\n\n"
+            f"```diff\n{diff_text}\n```"
+        )
+        self._submit_file_analysis(
+            user_label="explain-commit",
+            prompt=prompt,
+            status="explaining git changes …",
+        )
+
+    def _handle_git_generate_commit(self) -> None:
+        if self._streaming:
+            self._notice("stream active; wait for the assistant to finish")
+            return
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        try:
+            diff_text = self._git.diff(staged=False, pathspec=None)
+        except Exception as exc:
+            self._notice(f"git diff failed: {exc}")
+            return
+        if not diff_text or diff_text == "no unstaged changes":
+            self._notice("no unstaged changes to commit")
+            return
+        prompt = (
+            "Generate a concise git commit message based on the following diff. "
+            "Use conventional commits format (type: description). "
+            "Keep the message under 72 characters.\n\n"
+            f"```diff\n{diff_text}\n```"
+        )
+        self._submit_file_analysis(
+            user_label="generate-commit",
+            prompt=prompt,
+            status="generating commit message …",
+        )
+
+    def _handle_save_response(self, arg: str) -> None:
+        if not arg:
+            self._notice("usage: /save-file <path>")
+            return
+        last = self._last_assistant_response()
+        if last is None:
+            self._notice("no completed assistant response to save")
+            return
+        path = Path(arg).expanduser().resolve()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(last, encoding="utf-8")
+        except OSError as exc:
+            self._notice(f"save failed: {exc}")
+            return
+        self._notice(f"saved {len(last)} chars to {path}")
+
+    def _handle_export_session(self) -> None:
+        lines: list[str] = []
+        lines.append("# ask.ai session transcript\n\n")
+        for line in self._chat_lines:
+            if line.role == "user":
+                lines.append(f"## User\n\n{line.content}\n\n")
+            elif line.role == "assistant" and line.content:
+                lines.append(f"## Assistant\n\n{line.content}\n\n")
+            elif line.role == "system" and line.content:
+                lines.append(f"> {line.content}\n\n")
+        text = "".join(lines)
+        path = Path.cwd() / f"ask-export-{self._session_id}.md"
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self._notice(f"export failed: {exc}")
+            return
+        self._notice(f"exported {len(lines)} messages to {path.name}")
 
     def _handle_context_command(self, arg: str) -> None:
         try:
@@ -370,12 +587,17 @@ class AskWorkstationApp(App[None]):
             return
 
         base_user = self._plugins.transform_user_message(text)
+        task_model = self._router.select_model(base_user, current_model=self._active_chat_model)
+        if task_model != self._active_chat_model and self._router.enabled:
+            self._active_chat_model = task_model
+            self._status_message = f"routed to {task_model}"
         self._chat_lines.append(ChatLine(role="user", content=base_user))
         self._chat_lines.append(ChatLine(role="assistant", content="", streaming=True))
         assistant_index = len(self._chat_lines) - 1
         local_file_context = self._file_context.prompt_context()
         self._streaming = True
-        self._status_message = "streaming"
+        if self._status_message == "streaming":
+            self._status_message = "streaming"
         self._refresh_all()
 
         thread = threading.Thread(
@@ -505,6 +727,10 @@ class AskWorkstationApp(App[None]):
             self._ollama_status = "error"
             self._ollama_error = error
         self._refresh_all()
+        if not error and index < len(self._chat_lines):
+            text = self._chat_lines[index].content
+            if text:
+                self.call_after_refresh(self._write_to_scrollback, text)
 
     def _open_session(self, session_id: str, *, announce: bool) -> None:
         self._close_current_memory()
@@ -681,12 +907,16 @@ class AskWorkstationApp(App[None]):
         table.add_row(Text("ollama", style=MUTED), Text(self._ollama_label(), style=self._ollama_style()))
         table.add_row(Text("host", style=MUTED), Text(self._settings.ollama_host, style=BEIGE))
         table.add_row(Text("session", style=MUTED), Text(self._session_id, style=BEIGE))
+        table.add_row(Text("router", style=MUTED), Text("on" if self._router.enabled else "off", style=GREEN if self._router.enabled else MUTED))
+        git_label = "on" if self._settings.git_enabled else "off"
+        git_style = GREEN if self._settings.git_enabled else MUTED
+        table.add_row(Text("git", style=MUTED), Text(git_label, style=git_style))
         table.add_row(Text("files", style=MUTED), Text(self._file_context.status_label(), style=BEIGE))
 
         commands = Text()
         commands.append("\nCOMMANDS\n", style=f"bold {AMBER}")
         commands.append(
-            "/model <name>\n/models\n/session <id|num>\n/context <folder>\n/read <file>\n/explain <file>\n/summarize <file>\n/review <file>\n/find <pattern>\n/save [title]\n/clear\n",
+            "/workspace <dir>\n/model <name>\n/git-status\n/git-diff\n/git-log\n/save-file <path>\n/export\n",
             style=BEIGE,
         )
 
@@ -706,6 +936,7 @@ class AskWorkstationApp(App[None]):
     def _render_status(self) -> RenderableType:
         memory = self._memory_label()
         stream = "STREAM:ON" if self._streaming else "STREAM:IDLE"
+        git_avail = "GIT" if self._git.is_available and self._settings.git_enabled else ""
         return Text.assemble(
             ("MODEL ", MUTED),
             (self._active_chat_model, GREEN),
@@ -717,6 +948,7 @@ class AskWorkstationApp(App[None]):
             (self._ollama_status.upper(), self._ollama_style()),
             ("  |  CTX ", MUTED),
             (self._file_context.active_root_label, BEIGE),
+            (f"  |  {git_avail} ", GREEN) if git_avail else Text(""),
             ("  |  ", MUTED),
             (self._status_message, BEIGE),
         )
@@ -776,6 +1008,99 @@ class AskWorkstationApp(App[None]):
 
     def _model_matches_active(self, name: str) -> bool:
         return name == self._active_chat_model or name.split(":", 1)[0] == self._active_chat_model.split(":", 1)[0]
+
+    def action_copy_last_response(self) -> None:
+        last = self._last_assistant_response()
+        if last is None:
+            self._notice("no assistant response to copy")
+            return
+        if self._copy_to_clipboard(last):
+            self._notice(f"copied {len(last)} chars to clipboard")
+        else:
+            self._notice("clipboard not available; use /print instead")
+
+    def _format_exit_transcript(self) -> list[str]:
+        lines: list[str] = []
+        lines.append("── ask.ai transcript ──\n")
+        for line in self._chat_lines:
+            if line.role == "user":
+                lines.append(f"\n>>> {line.content}\n")
+            elif line.role == "assistant" and line.content:
+                lines.append(f"\n{line.content}\n")
+            elif line.role == "system" and line.content:
+                lines.append(f"\n# {line.content}\n")
+        lines.append("── end transcript ──\n")
+        return lines
+
+    def _last_assistant_response(self) -> str | None:
+        for line in reversed(self._chat_lines):
+            if line.role == "assistant" and line.content and not line.streaming:
+                return line.content
+        return None
+
+    def _print_last_response(self) -> None:
+        last = self._last_assistant_response()
+        if last is None:
+            self._notice("no completed assistant response to print")
+            return
+        self._write_to_scrollback(last)
+        self._notice(f"printed {len(last)} chars to terminal scrollback")
+
+    @staticmethod
+    def _write_to_scrollback(text: str) -> None:
+        out = sys.__stdout__
+        try:
+            out.write("\033[?47l")
+            out.flush()
+            out.write("\n")
+            out.write(text)
+            if not text.endswith("\n"):
+                out.write("\n")
+            out.write("\033[?47h")
+            out.flush()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _copy_to_clipboard(text: str) -> bool:
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+            return True
+        except ImportError:
+            pass
+        try:
+            if shutil.which("xclip"):
+                proc = subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                if proc.returncode == 0:
+                    return True
+        except OSError:
+            pass
+        try:
+            if shutil.which("wl-copy"):
+                proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                if proc.returncode == 0:
+                    return True
+        except OSError:
+            pass
+        try:
+            if shutil.which("pbcopy"):
+                proc = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                if proc.returncode == 0:
+                    return True
+        except OSError:
+            pass
+        try:
+            if shutil.which("clip"):
+                proc = subprocess.Popen(["clip"], stdin=subprocess.PIPE)
+                proc.communicate(text.encode("utf-8"))
+                return proc.returncode == 0
+        except OSError:
+            pass
+        return False
 
     @staticmethod
     def _one_line(text: str, *, limit: int) -> str:
