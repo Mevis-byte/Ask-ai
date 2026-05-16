@@ -19,7 +19,29 @@ class OllamaChatBackend:
     """Ollama-backed `ChatBackend` implementation."""
 
     def __init__(self, host: str | None = None) -> None:
+        self._host = host
         self._client = Client(host=host) if host else Client()
+
+    @property
+    def host(self) -> str:
+        return self._host or "default"
+
+    def set_host(self, host: str) -> None:
+        """Update the Ollama host URL. Handles raw IPs/hostnames by adding http/port."""
+        target = host.strip()
+        if not target:
+            return
+        
+        # If it doesn't look like a URL, make it one
+        if "://" not in target:
+            # Check for port
+            if ":" not in target:
+                target = f"http://{target}:11434"
+            else:
+                target = f"http://{target}"
+        
+        self._host = target
+        self._client = Client(host=target)
 
     def chat(
         self,

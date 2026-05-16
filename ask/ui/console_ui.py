@@ -162,6 +162,30 @@ class ConsoleUI:
             )
         )
 
+    def print_ollama_host_switched(self, host: str) -> None:
+        self._console.print(
+            Panel(
+                Text(f"Ollama host updated: {host}", style=f"bold {T.CYAN}"),
+                title=f"[{T.TITLE}]◆ /baseurl[/]",
+                border_style=T.GREEN,
+                padding=(0, 1),
+            )
+        )
+
+    def print_baseurl_usage(self) -> None:
+        self._console.print(
+            Panel(
+                Text.from_markup(
+                    f"[{T.DIM}]Update Ollama host:[/] [bold {T.MAGENTA}]/baseurl[/] [italic cyan]url|host[/]\n"
+                    f"[dim]Example:[/] [cyan]/baseurl 192.168.1.5[/] [dim]→ http://192.168.1.5:11434[/]\n"
+                    f"[dim]Example:[/] [cyan]/baseurl http://other-pc:11434[/]"
+                ),
+                title=f"[{T.TITLE}]◆ /baseurl[/]",
+                border_style=T.YELLOW,
+                padding=(0, 1),
+            )
+        )
+
     def print_model_usage(self, current: str) -> None:
         self._console.print(
             Panel(
@@ -176,20 +200,54 @@ class ConsoleUI:
             )
         )
 
-    def print_slash_commands_help(self) -> None:
+    def print_model_selection_prompt(self, models: list[tuple[str, str]]) -> None:
+        table = Table(show_header=True, border_style=T.CYAN, expand=True)
+        table.add_column("#", width=4, style=T.MAGENTA, justify="right")
+        table.add_column("Model", style=T.CYAN)
+        table.add_column("Size", style=T.DIM, justify="right")
+        for i, (name, size) in enumerate(models, 1):
+            table.add_row(str(i), name, size)
+        
         self._console.print(
             Panel(
-                Text.from_markup(
-                    f"[bold {T.MAGENTA}]/models[/]     [dim]—[/]  List installed Ollama models\n"
-                    f"[bold {T.MAGENTA}]/model[/] [cyan]name[/]  [dim]—[/]  Switch chat model (e.g. [cyan]llama3[/])\n"
-                    f"[bold {T.MAGENTA}]/help[/]      [dim]—[/]  Show this panel\n"
-                    f"[bold {T.DIM}]exit[/]          [dim]—[/]  End session"
-                ),
-                title=f"[{T.TITLE}]◆ SLASH COMMANDS[/]",
-                border_style=T.CYAN,
+                table,
+                title=f"[{T.TITLE}]◆ SELECT INITIAL MODEL[/]",
+                subtitle="[dim]Your default model is missing. Please select one.[/]",
+                border_style=T.YELLOW,
                 padding=(0, 1),
             )
         )
+
+    def prompt_model_choice(self, count: int) -> int:
+        while True:
+            choice = Prompt.ask(
+                f"[bold {T.MAGENTA}]SELECT[/] [dim](1-{count})[/]",
+                console=self._console,
+            ).strip()
+            try:
+                idx = int(choice)
+                if 1 <= idx <= count:
+                    return idx
+            except ValueError:
+                pass
+            self._console.print(f"[red]Invalid choice. Enter a number between 1 and {count}.[/]")
+def print_slash_commands_help(self) -> None:
+    self._console.print(
+        Panel(
+            Text.from_markup(
+                f"[bold {T.MAGENTA}]/models[/]         [dim]—[/]  List installed Ollama models\n"
+                f"[bold {T.MAGENTA}]/model[/] [cyan]name[/]      [dim]—[/]  Switch chat model\n"
+                f"[bold {T.MAGENTA}]/baseurl[/] [cyan]url[/]     [dim]—[/]  Update Ollama host URL\n"
+                f"[bold {T.MAGENTA}]/quit[/]             [dim]—[/]  End session (alias for exit)\n"
+                f"[bold {T.MAGENTA}]/help[/]          [dim]—[/]  Show this panel\n"
+                f"[bold {T.DIM}]exit[/]              [dim]—[/]  End session"
+            ),
+            title=f"[{T.TITLE}]◆ SLASH COMMANDS[/]",
+            border_style=T.CYAN,
+            padding=(0, 1),
+        )
+    )
+
 
     def print_unknown_slash(self, command: str) -> None:
         self._console.print(

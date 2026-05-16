@@ -154,7 +154,7 @@ class AskWorkstationApp(App[None]):
         Binding("ctrl+s", "save_session", "Save Session"),
         Binding("ctrl+y", "copy_last_response", "Copy Last Response"),
         Binding("tab", "focus_next_pane", "Switch Pane"),
-        Binding("ctrl+c", "quit", "Exit"),
+        Binding("ctrl+c", "quit_request", "Exit"),
     ]
 
     TITLE = "ask.ai workstation"
@@ -254,6 +254,15 @@ class AskWorkstationApp(App[None]):
         session = self._session_manager.create_session()
         self._open_session(session.id, announce=True)
 
+    def action_quit_request(self) -> None:
+        import time
+        now = time.monotonic()
+        if hasattr(self, "_last_sigint_time") and now - self._last_sigint_time < 2.0:
+            self.exit()
+        else:
+            self._last_sigint_time = now
+            self._notice("Type /quit or click Ctrl+C twice to exit")
+
     def action_save_session(self) -> None:
         self._save_current_session()
 
@@ -304,14 +313,37 @@ class AskWorkstationApp(App[None]):
         if command == "/model":
             if not arg:
                 self._add_system_line(f"current model: {self._active_chat_model}")
+                if self._installed_models:
+                    self._add_system_line("available: " + ", ".join(m[0] for m in self._installed_models))
                 return
             self._active_chat_model = arg
             self._status_message = f"model switched to {arg}"
+            
+            # Check if the new model exists
+            if self._installed_models and not any(m[0] == arg for m in self._installed_models):
+                self._add_system_line(f"warning: model '{arg}' does not appear to be installed")
+            
             self._refresh_status()
             self._refresh_settings()
             return
         if command == "/models":
-            self._add_system_line("refreshing Ollama model list")
+            self._add_system_line("refreshing Ollama model list...")
+            self._refresh_ollama_status()
+            if self._installed_models:
+                lines = ["installed models:"]
+                for name, size in self._installed_models:
+                    mark = "◀" if name == self._active_chat_model else " "
+                    lines.append(f"  {mark} {name:<24} {size:>8}")
+                self._add_system_line("\n".join(lines))
+            elif self._ollama_status == "online":
+                self._add_system_line("no models found. use 'ollama pull <name>' to install.")
+            return
+        if command == "/baseurl":
+            if not arg:
+                self._add_system_line("usage: /baseurl <url|host>")
+                return
+            self._backend.set_host(arg)
+            self._notice(f"Ollama host updated: {self._backend.host}")
             self._refresh_ollama_status()
             return
         if command == "/new":
@@ -384,6 +416,9 @@ class AskWorkstationApp(App[None]):
             self._chat_lines.clear()
             self._status_message = "session transcript cleared"
             self._refresh_all()
+            return
+        if command == "/quit":
+            self.exit()
             return
         if command in ("/copy", "/copy-last"):
             self.action_copy_last_response()
@@ -902,6 +937,7 @@ class AskWorkstationApp(App[None]):
         table.add_column(ratio=2)
         table.add_row(Text("SETTINGS", style=f"bold {AMBER}"), Text(""))
         table.add_row(Text("model", style=MUTED), Text(self._active_chat_model, style=GREEN))
+        table.add_row(Text("workspace", style=MUTED), Text(str(self._file_context.active_root), style=BEIGE))
         table.add_row(Text("memory", style=MUTED), Text(self._memory_label(), style=BEIGE))
         table.add_row(Text("stream", style=MUTED), Text("active" if self._streaming else "idle", style=GREEN))
         table.add_row(Text("ollama", style=MUTED), Text(self._ollama_label(), style=self._ollama_style()))
