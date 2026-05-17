@@ -3,13 +3,15 @@ services:
     build: .
     image: ask-ai:latest
     container_name: ask-ai
+    network_mode: host
     volumes:
       - ask-data:/data
       - .:/workspace:ro
     environment:
-      - ASK_OLLAMA_HOST=http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # In host mode, 127.0.0.1 refers to the host machine itself
+      - ASK_OLLAMA_HOST=http://127.0.0.1:11434
+      - ASK_MEMORY_PERSIST_PATH=/data/chat.sqlite
+      - ASK_RAG_PERSIST_DIR=/data/rag_index
     stdin_open: true
     tty: true
 
