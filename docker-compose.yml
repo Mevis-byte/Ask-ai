@@ -1,0 +1,17 @@
+services:
+  ask:
+    build: .
+    image: ask-ai:latest
+    container_name: ask-ai
+    volumes:
+      - ask-data:/data
+      - .:/workspace:ro
+    environment:
+      - ASK_OLLAMA_HOST=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true
+
+volumes:
+  ask-data:

@@ -186,7 +186,32 @@ No destructive git commands are exposed.
 
 # Installation
 
-## 1. Clone Repository
+## Docker (Recommended)
+
+The easiest way to run `ask.ai` is via Docker. This ensures all dependencies (including RAG components) are correctly configured.
+
+### 1. Build and Run
+
+```bash
+docker-compose up --build
+```
+
+### 2. Usage
+
+*   **TUI (Default):** `docker-compose run --rm ask`
+*   **Plain Chat:** `docker-compose run --rm ask chat`
+*   **Analyze local files:**
+    ```bash
+    docker-compose run --rm -v $(pwd):/workspace:ro ask analyze /workspace/myfile.py
+    ```
+
+**Note:** On Linux, `host.docker.internal` is mapped via `extra_hosts` in `docker-compose.yml` to allow the container to reach Ollama running on your host machine.
+
+---
+
+## Local Installation
+
+### 1. Clone Repository
 
 ```bash
 git clone https://github.com/Mevis-byte/Ask-ai.git
