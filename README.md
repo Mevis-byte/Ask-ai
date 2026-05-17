@@ -196,13 +196,27 @@ The easiest way to run `ask.ai` is via Docker. This ensures all dependencies (in
 docker-compose up --build
 ```
 
-### 2. Usage
+### 2. Easy Mode (Recommended)
 
-*   **TUI (Default):** `docker-compose run --rm ask`
-*   **Plain Chat:** `docker-compose run --rm ask chat`
+To run `askai` from anywhere as a simple command, add an alias to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+# Add this to your shell config
+alias askai='/path/to/Ask-ai/askai-docker.sh'
+```
+
+Now you can just type:
+*   `askai` - Launch the TUI
+*   `askai chat` - Start a chat
+*   `askai analyze myfile.py` - Analyze a file in your current directory
+
+### 3. Manual Usage
+
+*   **TUI (Default):** `docker compose run --rm ask`
+*   **Plain Chat:** `docker compose run --rm ask chat`
 *   **Analyze local files:**
     ```bash
-    docker-compose run --rm -v $(pwd):/workspace:ro ask analyze /workspace/myfile.py
+    docker compose run --rm -v $(pwd):/workspace:ro ask analyze /workspace/myfile.py
     ```
 
 **Note:** On Linux, `host.docker.internal` is mapped via `extra_hosts` in `docker-compose.yml` to allow the container to reach Ollama running on your host machine.
