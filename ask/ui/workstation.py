@@ -30,7 +30,7 @@ class CommandSuggester(Suggester):
         self.commands = [
             "/help", "/workspace", "/context", "/clear-context", "/read",
             "/explain", "/summarize", "/review", "/find", "/git-status",
-            "/git-diff", "/git-log", "/explain-commit", "/generate-commit",
+            "/git-diff", "/git-log", "/git-review", "/explain-commit", "/generate-commit",
             "/new", "/save", "/sessions", "/session", "/resume", "/clear",
             "/quit", "/save-file", "/export", "/copy", "/print", "/model",
             "/models", "/baseurl"
@@ -88,6 +88,7 @@ from ask.models import OllamaChatBackend
 from ask.models.router import ModelRouter
 from ask.plugins import GitPlugin, PluginRegistry
 from ask.rag import Retriever, augment_user_message
+from ask.rag.injection import augment_with_structural_context
 from ask.streaming import iter_ollama_text_deltas
 from ask.tools import (
     FileAnalysisMode,
@@ -95,6 +96,14 @@ from ask.tools import (
     build_file_read_panel,
     detect_language,
 )
+from ask.tools.scanner import (
+    ProjectSummary,
+    build_dependency_graph,
+    format_dependency_context,
+    format_project_summary,
+    scan_project,
+)
+from ask.tools.memory_tracker import ContextTracker
 
 AMBER = "#c49a52"
 GREEN = "#7f9f6b"
@@ -323,6 +332,11 @@ class AskWorkstationApp(App[None]):
         self._history_index: int = -1
         self._current_typing_buffer: str = ""
 
+        self._context_tracker = ContextTracker()
+        self._project_summary: ProjectSummary | None = None
+        self._dependency_graph = None
+        self._workspace_analysis_stage = ""
+
     def compose(self) -> ComposeResult:
         yield Static("ASK.AI // LOCAL WORKSTATION // OLLAMA TERMINAL OS", id="topbar")
         with Horizontal(id="workspace"):
@@ -343,6 +357,29 @@ class AskWorkstationApp(App[None]):
         self.query_one("#command-input", Input).focus()
         self._refresh_ollama_status()
         self.set_interval(30, self._refresh_ollama_status)
+
+        # Auto-detect project in current directory
+        try:
+            cwd = __import__("pathlib").Path.cwd()
+            git_dir = cwd / ".git"
+            if git_dir.is_dir():
+                self._notice("[1/2] Scanning project structure...")
+                proj = scan_project(cwd)
+                self._project_summary = proj
+                self._notice("[2/2] Building dependency graph...")
+                graph = build_dependency_graph(cwd)
+                self._dependency_graph = graph
+                self._context_tracker.set_workspace(
+                    root=str(cwd),
+                    languages=list(proj.languages.keys()) if proj.languages else None,
+                    frameworks=proj.frameworks if proj.frameworks else None,
+                )
+                self._add_system_line(
+                    f"Auto-detected project: {proj.total_files} files, "
+                    f"{', '.join(list(proj.languages.keys())[:4])}"
+                )
+        except Exception:
+            pass
 
     def on_unmount(self) -> None:
         lines = self._format_exit_transcript()
@@ -438,6 +475,7 @@ class AskWorkstationApp(App[None]):
                         "/git-status        show working tree status",
                         "/git-diff [file]   show unstaged diff",
                         "/git-log [n]       show recent commits (default: 10)",
+                        "/git-review        AI review of all changes (risks, architecture, security)",
                         "/explain-commit    AI explanation of staged changes",
                         "/generate-commit   AI-generated commit message from diff",
                         "── sessions ──",
@@ -565,6 +603,9 @@ class AskWorkstationApp(App[None]):
             return
         if command == "/generate-commit":
             self._handle_git_generate_commit()
+            return
+        if command == "/git-review":
+            self._handle_git_review()
             return
         if command in ("/save-file", "/save-response"):
             self._handle_save_response(arg)
@@ -701,6 +742,54 @@ class AskWorkstationApp(App[None]):
             status="generating commit message …",
         )
 
+    def _handle_git_review(self) -> None:
+        if self._streaming:
+            self._notice("stream active; wait for the assistant to finish")
+            return
+        if not self._settings.git_enabled:
+            self._notice("git integration is disabled in config")
+            return
+        try:
+            diff_text = self._git.diff(staged=False, pathspec=None)
+            changed = self._git.changed_files()
+        except Exception as exc:
+            self._notice(f"git review failed: {exc}")
+            return
+        if not diff_text or diff_text == "no unstaged changes":
+            try:
+                diff_text = self._git.diff(staged=True)
+                changed = self._git.staged_files()
+            except Exception:
+                self._notice("no changes to review")
+                return
+        if not diff_text or diff_text == "no unstaged changes":
+            self._notice("no changes to review")
+            return
+
+        dep_context = ""
+        if self._dependency_graph and changed:
+            dep_parts: list[str] = []
+            for f in changed[:8]:
+                ctx = format_dependency_context(self._dependency_graph, f)
+                if ctx:
+                    dep_parts.append(ctx)
+            dep_context = "\n".join(dep_parts)
+
+        session_ctx = self._context_tracker.get_session_context() if self._context_tracker else ""
+
+        from ask.tools.files import build_git_review_prompt
+        prompt = build_git_review_prompt(
+            diff_text=diff_text,
+            changed_files=changed,
+            dependency_context=dep_context,
+            session_context=session_ctx,
+        )
+        self._submit_file_analysis(
+            user_label="git-review",
+            prompt=prompt,
+            status="analyzing git changes … [1/3] scanning diff …",
+        )
+
     def _handle_save_response(self, arg: str) -> None:
         if not arg:
             self._notice("usage: /save-file <path>")
@@ -739,11 +828,36 @@ class AskWorkstationApp(App[None]):
 
     def _handle_context_command(self, arg: str) -> None:
         try:
-            summary = self._file_context.set_context(arg) if arg else self._file_context.summarize()
+            if arg:
+                self._notice("[1/4] Scanning project structure...")
+                summary = self._file_context.set_context(arg)
+                root = self._file_context.active_root
+
+                self._notice("[2/4] Detecting languages and frameworks...")
+                proj = scan_project(root)
+                self._project_summary = proj
+
+                self._notice("[3/4] Building dependency graph...")
+                graph = build_dependency_graph(root)
+                self._dependency_graph = graph
+
+                self._notice("[4/4] Generating architecture summary...")
+                self._context_tracker.set_workspace(
+                    root=str(root),
+                    languages=list(proj.languages.keys()) if proj.languages else None,
+                    frameworks=proj.frameworks if proj.frameworks else None,
+                )
+
+                proj_text = format_project_summary(proj)
+                summary_lines = self._format_context_summary(summary)
+                combined = f"{summary_lines}\n\n{proj_text}"
+                self._add_system_line(combined)
+            else:
+                summary = self._file_context.summarize()
+                self._add_system_line(self._format_context_summary(summary))
         except LocalFileAccessError as exc:
             self._notice(f"context denied: {exc}")
             return
-        self._add_system_line(self._format_context_summary(summary))
 
     def _handle_read_command(self, arg: str) -> None:
         try:
@@ -767,9 +881,30 @@ class AskWorkstationApp(App[None]):
             return
         language = detect_language(result.path)
         suffix = " [truncated]" if result.truncated else ""
+
+        imports: list[str] | None = None
+        if result.content:
+            from ask.tools.files import extract_imports
+            imports = extract_imports(result.content[:4096], language)
+
+        related: list[str] | None = None
+        if self._dependency_graph and result.display_path:
+            related = self._dependency_graph.related_files(result.display_path, depth=1)
+
+        session_ctx = self._context_tracker.get_session_context() if self._context_tracker else ""
+
+        prompt = build_file_analysis_prompt(
+            result, mode,
+            imports=imports,
+            related_files=related,
+            session_context=session_ctx or None,
+        )
+
+        self._context_tracker.track_file_analysis(result.display_path, mode, language)
+
         self._submit_file_analysis(
             user_label=f"{mode} {result.display_path}",
-            prompt=build_file_analysis_prompt(result, mode),
+            prompt=prompt,
             status=f"{mode}: {result.display_path} ({language}){suffix}",
         )
 
@@ -789,6 +924,8 @@ class AskWorkstationApp(App[None]):
             self._notice("no active memory store")
             return
 
+        self._context_tracker.track_topic(text[:80])
+
         base_user = self._plugins.transform_user_message(text)
         task_model = self._router.select_model(base_user, current_model=self._active_chat_model)
         if task_model != self._active_chat_model and self._router.enabled:
@@ -798,6 +935,7 @@ class AskWorkstationApp(App[None]):
         self._chat_lines.append(ChatLine(role="assistant", content="", streaming=True))
         assistant_index = len(self._chat_lines) - 1
         local_file_context = self._file_context.prompt_context()
+        session_ctx = self._context_tracker.get_session_context() if self._context_tracker else ""
         self._streaming = True
         if self._status_message == "streaming":
             self._status_message = "streaming"
@@ -805,7 +943,7 @@ class AskWorkstationApp(App[None]):
 
         thread = threading.Thread(
             target=self._stream_response_worker,
-            args=(base_user, assistant_index, self._session_id, self._memory, local_file_context),
+            args=(base_user, assistant_index, self._session_id, self._memory, local_file_context, session_ctx),
             daemon=True,
         )
         thread.start()
@@ -836,11 +974,32 @@ class AskWorkstationApp(App[None]):
         session_id: str,
         memory: ChatMemory,
         local_file_context: str | None,
+        session_ctx: str = "",
     ) -> None:
         try:
+            dep_context = ""
+            if self._dependency_graph:
+                related_parts: list[str] = []
+                seen = set()
+                for line in self._chat_lines:
+                    if line.role == "user" and line.content:
+                        words = set(line.content.lower().split())
+                        for f in self._dependency_graph.all_files():
+                            path_words = set(f.lower().replace("/", " ").replace("\\", " ").replace(".", " ").split())
+                            if words & path_words and f not in seen:
+                                ctx = format_dependency_context(self._dependency_graph, f)
+                                if ctx:
+                                    related_parts.append(ctx)
+                                    seen.add(f)
+                dep_context = "\n".join(related_parts)
+
             if self._settings.rag_enabled:
                 docs = self._retriever.retrieve(base_user, top_k=self._settings.rag_top_k)
-                after_docs = augment_user_message(base_user, docs)
+                after_docs = augment_with_structural_context(
+                    base_user, docs,
+                    dependency_context=dep_context or None,
+                    session_context=session_ctx or None,
+                )
             else:
                 after_docs = base_user
 
@@ -1077,6 +1236,17 @@ class AskWorkstationApp(App[None]):
             label = "you" if line.role == "user" else "ai"
             preview = self._one_line(line.content, limit=28)
             lines.append(f"{label:>3}: {preview}\n", style=MUTED)
+
+        if self._context_tracker and self._context_tracker.state.analyzed_files:
+            lines.append("\nANALYZED FILES\n", style=f"bold {GREEN}")
+            for f in self._context_tracker.state.analyzed_files[-4:]:
+                lines.append(f"  {f.path}\n", style=MUTED)
+
+        if self._context_tracker and self._context_tracker.state.discussed_topics:
+            lines.append("\nTOPICS\n", style=f"bold {GREEN}")
+            for t in self._context_tracker.state.discussed_topics[-3:]:
+                preview = self._one_line(t, limit=36)
+                lines.append(f"  {preview}\n", style=MUTED)
         return lines
 
     def _render_chat(self) -> RenderableType:
@@ -1112,11 +1282,23 @@ class AskWorkstationApp(App[None]):
         table.add_row(Text("SETTINGS", style=f"bold {AMBER}"), Text(""))
         table.add_row(Text("model", style=MUTED), Text(self._active_chat_model, style=GREEN))
         table.add_row(Text("workspace", style=MUTED), Text(str(self._file_context.active_root), style=BEIGE))
-        table.add_row(Text("memory", style=MUTED), Text(self._memory_label(), style=BEIGE))
+        memory_text = self._memory_label()
+        if self._context_tracker and self._context_tracker.state.analyzed_files:
+            memory_text += f" ({len(self._context_tracker.state.analyzed_files)} files)"
+        table.add_row(Text("memory", style=MUTED), Text(memory_text, style=BEIGE))
         table.add_row(Text("stream", style=MUTED), Text("active" if self._streaming else "idle", style=GREEN))
         table.add_row(Text("ollama", style=MUTED), Text(self._ollama_label(), style=self._ollama_style()))
         table.add_row(Text("host", style=MUTED), Text(self._backend.host, style=BEIGE))
         table.add_row(Text("session", style=MUTED), Text(self._session_id, style=BEIGE))
+
+        if self._project_summary:
+            proj = self._project_summary
+            table.add_row(Text("langs", style=MUTED), Text(", ".join(list(proj.languages.keys())[:4]), style=BEIGE))
+            if proj.frameworks:
+                table.add_row(Text("framework", style=MUTED), Text(", ".join(proj.frameworks[:3]), style=GREEN))
+            if self._dependency_graph:
+                table.add_row(Text("deps tracked", style=MUTED), Text(str(self._dependency_graph.count()), style=BEIGE))
+
         table.add_row(Text("router", style=MUTED), Text("on" if self._router.enabled else "off", style=GREEN if self._router.enabled else MUTED))
         git_label = "on" if self._settings.git_enabled else "off"
         git_style = GREEN if self._settings.git_enabled else MUTED
@@ -1147,18 +1329,31 @@ class AskWorkstationApp(App[None]):
         memory = self._memory_label()
         stream = "STREAM:ON" if self._streaming else "STREAM:IDLE"
         git_avail = "GIT" if self._git.is_available and self._settings.git_enabled else ""
+        branch = ""
+        if git_avail:
+            try:
+                b = self._git.current_branch
+                if b and b != "HEAD":
+                    branch = f" [{b}]"
+            except Exception:
+                pass
+        ctx_label = self._file_context.active_root_label
+        if self._project_summary:
+            fc = self._project_summary.total_files
+            lang_count = len(self._project_summary.languages)
+            ctx_label = f"{ctx_label} ({fc}f, {lang_count}L)"
         return Text.assemble(
             ("MODEL ", MUTED),
             (self._active_chat_model, GREEN),
-            ("  |  MEMORY ", MUTED),
+            ("  |  CTX ", MUTED),
+            (ctx_label, BEIGE),
+            ("  |  MEM ", MUTED),
             (memory, BEIGE),
             ("  |  ", MUTED),
             (stream, AMBER if self._streaming else GREEN),
             ("  |  OLLAMA ", MUTED),
             (self._ollama_status.upper(), self._ollama_style()),
-            ("  |  CTX ", MUTED),
-            (self._file_context.active_root_label, BEIGE),
-            (f"  |  {git_avail} ", GREEN) if git_avail else Text(""),
+            (f"  |  {git_avail}{branch} ", GREEN) if git_avail else Text(),
             ("  |  ", MUTED),
             (self._status_message, BEIGE),
         )

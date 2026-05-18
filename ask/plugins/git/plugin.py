@@ -65,6 +65,17 @@ class GitPlugin:
     def repo_root(self) -> Path | None:
         return self._repo_path
 
+    @property
+    def current_branch(self) -> str | None:
+        try:
+            self._require_repo()
+            result = _git_cmd(["rev-parse", "--abbrev-ref", "HEAD"], self._repo_path)
+            return result.strip()
+        except GitError:
+            return None
+        except subprocess.TimeoutExpired:
+            return None
+
     def set_repo(self, path: str | None = None) -> str:
         self._repo_path = _find_repo(path)
         return str(self._repo_path)
@@ -105,6 +116,26 @@ class GitPlugin:
         self._require_repo()
         raw = _git_cmd(["diff", "--name-only"], self._repo_path)
         return [f for f in raw.splitlines() if f.strip()]
+
+    def diff_stat(self) -> str:
+        self._require_repo()
+        return _git_cmd(["diff", "--stat"], self._repo_path, max_lines=30)
+
+    def staged_files(self) -> list[str]:
+        self._require_repo()
+        raw = _git_cmd(["diff", "--cached", "--name-only"], self._repo_path)
+        return [f for f in raw.splitlines() if f.strip()]
+
+    def full_diff(self) -> str:
+        self._require_repo()
+        staged = self.diff(staged=True)
+        unstaged = self.diff(staged=False)
+        parts: list[str] = []
+        if staged:
+            parts.append("STAGED CHANGES:\n" + staged)
+        if unstaged:
+            parts.append("UNSTAGED CHANGES:\n" + unstaged)
+        return "\n\n".join(parts) if parts else ""
 
     def _require_repo(self) -> None:
         if self._repo_path is None:

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
 
 from ask.config import Settings, save_user_settings
 from ask.memory import ChatMemory
 from ask.models import OllamaChatBackend
 from ask.plugins import PluginRegistry
 from ask.rag import Retriever, augment_user_message
+from ask.rag.injection import augment_with_structural_context
 from ask.streaming import collect_stream_text, iter_ollama_text_deltas
+from ask.tools.scanner import build_dependency_graph, format_dependency_context, scan_project
+from ask.tools.memory_tracker import ContextTracker
 from ask.ui import ConsoleUI
 
 
@@ -38,9 +42,10 @@ class ChatApplication:
         self._retriever = retriever
         self._plugins = plugins
         self._active_chat_model = settings.chat_model
+        self._context_tracker = ContextTracker()
+        self._dependency_graph = None
 
     def _handle_slash_command(self, line: str) -> None:
-        """Handle `/…` REPL commands (no LLM call)."""
         parts = line.split(maxsplit=1)
         cmd = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
@@ -65,13 +70,10 @@ class ChatApplication:
                 return
             self._active_chat_model = arg
             self._ui.print_model_switched(self._active_chat_model)
-            
-            # Persist globally
-            import dataclasses
+
             updated = dataclasses.replace(self._settings, chat_model=arg)
             save_user_settings(updated)
-            
-            # Persist per session
+
             self._memory.set_metadata({"chat_model": arg})
             return
         if cmd == "/baseurl":
@@ -80,13 +82,10 @@ class ChatApplication:
                 return
             self._backend.set_host(arg)
             self._ui.print_ollama_host_switched(self._backend.host)
-            
-            # Persist globally
-            import dataclasses
+
             updated = dataclasses.replace(self._settings, ollama_host=self._backend.host)
             save_user_settings(updated)
 
-            # Auto-refresh models for the new host
             self._handle_slash_command("/models")
             return
         self._ui.print_unknown_slash(cmd)
@@ -97,13 +96,11 @@ class ChatApplication:
 
     def run(self) -> None:
         self._ui.print_chat_header()
-        
-        # Load model from memory metadata if available
+
         meta = self._memory.get_metadata()
         if "chat_model" in meta:
             self._active_chat_model = str(meta["chat_model"])
-        
-        # Check model availability on startup
+
         try:
             available = self._backend.list_installed_models()
         except Exception as exc:
@@ -117,33 +114,54 @@ class ChatApplication:
             idx = self._ui.prompt_model_choice(len(available))
             self._active_chat_model = available[idx - 1][0]
             self._ui.print_model_switched(self._active_chat_model)
-            # Update the setting so it carries over if we were to reload config, 
-            # though here it just stays in self._active_chat_model for the session.
 
-        import time
         import signal
+        import time
 
-        self._last_sigint = 0.0
-        self._exit_requested = False
+        last_sigint = 0.0
+        exit_requested = False
 
         def sigint_handler(sig, frame):
+            nonlocal last_sigint, exit_requested
             now = time.time()
-            if now - self._last_sigint < 2.0:
-                self._exit_requested = True
-                # We need to print here because the exception won't be caught by the input loop immediately
+            if now - last_sigint < 2.0:
+                exit_requested = True
                 self._ui.print_session_end()
                 sys.exit(0)
             else:
                 self._ui.print_status("Type /quit or click Ctrl+C twice to exit")
-                self._last_sigint = now
+                last_sigint = now
 
         signal.signal(signal.SIGINT, sigint_handler)
 
-        while not self._exit_requested:
+        # Auto-detect if there's a project in the current directory
+        import os
+        from pathlib import Path
+        try:
+            cwd = Path.cwd()
+            git_dir = cwd / ".git"
+            if git_dir.is_dir() or any(cwd.iterdir()) if cwd.is_dir() else False:
+                self._ui.print_status("Scanning project directory...")
+                proj = scan_project(cwd)
+                if proj.total_files > 0:
+                    self._dependency_graph = build_dependency_graph(cwd)
+                    self._context_tracker.set_workspace(
+                        root=str(cwd),
+                        languages=list(proj.languages.keys()),
+                        frameworks=proj.frameworks,
+                    )
+                    self._ui.print_status(
+                        f"Auto-detected project: {proj.total_files} files, "
+                        f"{', '.join(list(proj.languages.keys())[:4])}"
+                    )
+        except Exception:
+            pass
+
+        while not exit_requested:
             try:
                 self._ui.print_session_status_bar(active_chat_model=self._active_chat_model)
                 user_input = self._ui.prompt_user_line()
-                
+
                 if user_input.lower() in ("exit", "/quit", "quit"):
                     self._ui.print_session_end()
                     break
@@ -155,12 +173,32 @@ class ChatApplication:
                 if not user_input:
                     continue
 
+                self._context_tracker.track_topic(user_input[:80])
+
                 base_user = self._plugins.transform_user_message(user_input)
                 self._ui.print_user_transmission(base_user)
 
+                dep_context = ""
+                if self._dependency_graph:
+                    words = set(base_user.lower().split())
+                    related_parts: list[str] = []
+                    for f in self._dependency_graph.all_files():
+                        path_words = set(f.lower().replace("/", " ").replace("\\", " ").replace(".", " ").split())
+                        if words & path_words:
+                            ctx = format_dependency_context(self._dependency_graph, f)
+                            if ctx:
+                                related_parts.append(ctx)
+                    dep_context = "\n".join(related_parts[:3])
+
+                session_ctx = self._context_tracker.get_session_context() or ""
+
                 if self._settings.rag_enabled:
                     docs = self._retriever.retrieve(base_user, top_k=self._settings.rag_top_k)
-                    after_docs = augment_user_message(base_user, docs)
+                    after_docs = augment_with_structural_context(
+                        base_user, docs,
+                        dependency_context=dep_context or None,
+                        session_context=session_ctx or None,
+                    )
                 else:
                     after_docs = base_user
 
@@ -195,7 +233,7 @@ class ChatApplication:
                 self._memory.append({"role": "user", "content": base_user})
                 self._memory.append({"role": "assistant", "content": full})
                 self._plugins.notify_assistant(full)
-                
+
             except KeyboardInterrupt:
                 now = time.time()
                 if now - last_sigint < 2.0:
