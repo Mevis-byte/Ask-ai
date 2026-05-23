@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import signal
 import sys
+import time
+from pathlib import Path
 
 from ask.config import Settings, save_user_settings
 from ask.memory import ChatMemory
@@ -9,6 +13,16 @@ from ask.models import OllamaChatBackend
 from ask.plugins import PluginRegistry
 from ask.rag import Retriever, augment_user_message
 from ask.rag.injection import augment_with_structural_context
+from ask.security.input_validator import (
+    InputValidationError,
+    validate_user_message,
+)
+from ask.security.prompt_injection import (
+    InjectionAnalysis,
+    analyze_prompt_injection,
+    get_safe_block_response,
+)
+from ask.security.rate_limiter import RateLimiter, RateLimitError
 from ask.streaming import collect_stream_text, iter_ollama_text_deltas
 from ask.tools.scanner import build_dependency_graph, format_dependency_context, scan_project
 from ask.tools.memory_tracker import ContextTracker
@@ -23,7 +37,11 @@ def inject_memory_snippets(text: str, snippets: list[str]) -> str:
 
 
 class ChatApplication:
-    """Wires config, memory, RAG, plugins, streaming, and UI into a REPL."""
+    """Wires config, memory, RAG, plugins, streaming, and UI into a REPL.
+
+    Security: Input validation, rate limiting, and prompt injection detection
+    are applied to every user message before processing.
+    """
 
     def __init__(
         self,
@@ -44,6 +62,15 @@ class ChatApplication:
         self._active_chat_model = settings.chat_model
         self._context_tracker = ContextTracker()
         self._dependency_graph = None
+        self._rate_limiter = RateLimiter(
+            calls_per_second=5.0,
+            burst_size=10,
+            llm_calls_per_second=1.0,
+            llm_burst=3,
+        )
+        self._consecutive_injections = 0
+        self._max_consecutive_injections = 3
+        self._shutdown_requested = False
 
     def _handle_slash_command(self, line: str) -> None:
         parts = line.split(maxsplit=1)
@@ -56,8 +83,8 @@ class ChatApplication:
         if cmd == "/models":
             try:
                 rows = self._backend.list_installed_models()
-            except Exception as exc:
-                self._ui.print_ollama_list_error(str(exc))
+            except Exception:
+                self._ui.print_ollama_list_error("Unable to reach Ollama")
                 return
             if not rows:
                 self._ui.print_models_empty()
@@ -68,24 +95,32 @@ class ChatApplication:
             if not arg:
                 self._ui.print_model_usage(self._active_chat_model)
                 return
-            self._active_chat_model = arg
+            from ask.security.input_validator import validate_model_name
+            try:
+                safe_name = validate_model_name(arg)
+            except InputValidationError as exc:
+                self._ui.print_status(str(exc))
+                return
+            self._active_chat_model = safe_name
             self._ui.print_model_switched(self._active_chat_model)
-
-            updated = dataclasses.replace(self._settings, chat_model=arg)
+            updated = dataclasses.replace(self._settings, chat_model=safe_name)
             save_user_settings(updated)
-
-            self._memory.set_metadata({"chat_model": arg})
+            self._memory.set_metadata({"chat_model": safe_name})
             return
         if cmd == "/baseurl":
             if not arg:
                 self._ui.print_baseurl_usage()
                 return
-            self._backend.set_host(arg)
+            from ask.security.input_validator import validate_command_arg
+            try:
+                safe_host = validate_command_arg(arg)
+            except InputValidationError as exc:
+                self._ui.print_status(str(exc))
+                return
+            self._backend.set_host(safe_host)
             self._ui.print_ollama_host_switched(self._backend.host)
-
             updated = dataclasses.replace(self._settings, ollama_host=self._backend.host)
             save_user_settings(updated)
-
             self._handle_slash_command("/models")
             return
         self._ui.print_unknown_slash(cmd)
@@ -103,8 +138,8 @@ class ChatApplication:
 
         try:
             available = self._backend.list_installed_models()
-        except Exception as exc:
-            self._ui.print_ollama_list_error(str(exc))
+        except Exception:
+            self._ui.print_ollama_list_error("Unable to reach Ollama")
             available = []
 
         if not available:
@@ -115,17 +150,13 @@ class ChatApplication:
             self._active_chat_model = available[idx - 1][0]
             self._ui.print_model_switched(self._active_chat_model)
 
-        import signal
-        import time
-
         last_sigint = 0.0
-        exit_requested = False
 
         def sigint_handler(sig, frame):
-            nonlocal last_sigint, exit_requested
+            nonlocal last_sigint
             now = time.time()
             if now - last_sigint < 2.0:
-                exit_requested = True
+                self._shutdown_requested = True
                 self._ui.print_session_end()
                 sys.exit(0)
             else:
@@ -134,13 +165,10 @@ class ChatApplication:
 
         signal.signal(signal.SIGINT, sigint_handler)
 
-        # Auto-detect if there's a project in the current directory
-        import os
-        from pathlib import Path
         try:
             cwd = Path.cwd()
             git_dir = cwd / ".git"
-            if git_dir.is_dir() or any(cwd.iterdir()) if cwd.is_dir() else False:
+            if git_dir.is_dir() or (cwd.is_dir() and any(cwd.iterdir())):
                 self._ui.print_status("Scanning project directory...")
                 proj = scan_project(cwd)
                 if proj.total_files > 0:
@@ -157,7 +185,14 @@ class ChatApplication:
         except Exception:
             pass
 
-        while not exit_requested:
+        while not self._shutdown_requested:
+            try:
+                self._rate_limiter.check_command()
+            except RateLimitError as exc:
+                self._ui.print_status(str(exc))
+                time.sleep(1)
+                continue
+
             try:
                 self._ui.print_session_status_bar(active_chat_model=self._active_chat_model)
                 user_input = self._ui.prompt_user_line()
@@ -173,9 +208,30 @@ class ChatApplication:
                 if not user_input:
                     continue
 
-                self._context_tracker.track_topic(user_input[:80])
+                injection: InjectionAnalysis = analyze_prompt_injection(user_input)
+                if injection.should_block(threshold=0.5):
+                    self._consecutive_injections += 1
+                    if self._consecutive_injections >= self._max_consecutive_injections:
+                        self._ui.print_status(
+                            "Multiple blocked attempts detected. Ending session."
+                        )
+                        break
+                    self._ui.print_status(
+                        "Message filtered — contains patterns that may attempt prompt injection."
+                    )
+                    self._ui.print_plain(get_safe_block_response())
+                    continue
+                self._consecutive_injections = 0
 
-                base_user = self._plugins.transform_user_message(user_input)
+                try:
+                    safe_input = validate_user_message(user_input)
+                except InputValidationError as exc:
+                    self._ui.print_status(str(exc))
+                    continue
+
+                self._context_tracker.track_topic(safe_input[:80])
+
+                base_user = self._plugins.transform_user_message(safe_input)
                 self._ui.print_user_transmission(base_user)
 
                 dep_context = ""
@@ -183,7 +239,9 @@ class ChatApplication:
                     words = set(base_user.lower().split())
                     related_parts: list[str] = []
                     for f in self._dependency_graph.all_files():
-                        path_words = set(f.lower().replace("/", " ").replace("\\", " ").replace(".", " ").split())
+                        path_words = set(
+                            f.lower().replace("/", " ").replace("\\", " ").replace(".", " ").split()
+                        )
                         if words & path_words:
                             ctx = format_dependency_context(self._dependency_graph, f)
                             if ctx:
@@ -214,6 +272,12 @@ class ChatApplication:
                 history = self._memory.get()
                 api_messages = list(history)
                 api_messages.append({"role": "user", "content": turn_user})
+
+                try:
+                    self._rate_limiter.check_llm_call()
+                except RateLimitError as exc:
+                    self._ui.print_status(str(exc))
+                    continue
 
                 self._ui.print_response_label()
 

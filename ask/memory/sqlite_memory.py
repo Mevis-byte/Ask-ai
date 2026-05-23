@@ -6,8 +6,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ask.memory.types import ChatMessage
+from ask.security.output_filter import redact_secrets
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -15,7 +17,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     title TEXT,
-    metadata TEXT,
+    metadata TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     saved_at TEXT
@@ -53,6 +55,10 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
 END;
 """
 
+_MAX_CONVERSATION_ID_LENGTH = 256
+_MAX_METADATA_JSON_LENGTH = 65536
+_MAX_MESSAGE_CONTENT_LENGTH = 1048576
+
 
 @dataclass(frozen=True)
 class ConversationSummary:
@@ -79,8 +85,28 @@ def _is_readonly_error(exc: sqlite3.OperationalError) -> bool:
     return "readonly" in str(exc).lower()
 
 
+def _validate_conversation_id(cid: str) -> str:
+    if not isinstance(cid, str) or not cid.strip():
+        raise ValueError("Conversation ID must be a non-empty string")
+    cid = cid.strip()
+    if len(cid) > _MAX_CONVERSATION_ID_LENGTH:
+        raise ValueError(f"Conversation ID exceeds {_MAX_CONVERSATION_ID_LENGTH} characters")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in cid):
+        raise ValueError("Conversation ID contains control characters")
+    return cid
+
+
+def _validate_message_content(content: str) -> str:
+    if not isinstance(content, str):
+        raise ValueError("Message content must be a string")
+    if len(content) > _MAX_MESSAGE_CONTENT_LENGTH:
+        raise ValueError(f"Message content exceeds {_MAX_MESSAGE_CONTENT_LENGTH} characters")
+    return content
+
+
 def _conversation_columns(conn: sqlite3.Connection) -> set[str]:
-    return {str(row[1]) for row in conn.execute("PRAGMA table_info(conversations)")}
+    rows = conn.execute("PRAGMA table_info(conversations)").fetchall()
+    return {str(r[1]) for r in rows}
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -93,27 +119,14 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def _ensure_conversation_columns(conn: sqlite3.Connection) -> None:
     columns = _conversation_columns(conn)
-    if "title" not in columns:
-        try:
-            conn.execute("ALTER TABLE conversations ADD COLUMN title TEXT")
-        except sqlite3.OperationalError as exc:
-            if _is_readonly_error(exc):
-                return
-            raise
-    if "metadata" not in columns:
-        try:
-            conn.execute("ALTER TABLE conversations ADD COLUMN metadata TEXT")
-        except sqlite3.OperationalError as exc:
-            if _is_readonly_error(exc):
-                return
-            raise
-    if "saved_at" not in columns:
-        try:
-            conn.execute("ALTER TABLE conversations ADD COLUMN saved_at TEXT")
-        except sqlite3.OperationalError as exc:
-            if _is_readonly_error(exc):
-                return
-            raise
+    for col, default in [("title", "TEXT"), ("metadata", "TEXT DEFAULT '{}'"), ("saved_at", "TEXT")]:
+        if col not in columns:
+            try:
+                conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {default}")
+            except sqlite3.OperationalError as exc:
+                if _is_readonly_error(exc):
+                    return
+                raise
 
 
 def _ensure_schema_on_connection(conn: sqlite3.Connection) -> None:
@@ -162,13 +175,15 @@ def list_conversations(db_path: Path) -> list[ConversationSummary]:
             ORDER BY c.updated_at DESC, c.created_at DESC
             """
         ).fetchall()
-        
+
         results = []
         for row in rows:
-            meta_raw = str(row["metadata"]) if row["metadata"] else "{}"
+            meta_raw = row["metadata"] if row["metadata"] else "{}"
             try:
-                meta = json.loads(meta_raw)
-            except Exception:
+                meta = json.loads(str(meta_raw))
+                if not isinstance(meta, dict):
+                    meta = {}
+            except (json.JSONDecodeError, TypeError):
                 meta = {}
             results.append(
                 ConversationSummary(
@@ -193,6 +208,7 @@ def mark_conversation_saved(
     title: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    cid = _validate_conversation_id(conversation_id)
     ensure_sqlite_memory_db(db_path)
     conn = sqlite3.connect(str(db_path))
     try:
@@ -200,27 +216,27 @@ def mark_conversation_saved(
         if "title" not in columns or "saved_at" not in columns:
             raise sqlite3.OperationalError("session metadata columns are unavailable")
         now = _utc_now()
-        effective_title = title.strip() if title and title.strip() else _default_title(conversation_id)
-        
+        effective_title = title.strip() if title and title.strip() else _default_title(cid)
+
         meta_json = json.dumps(metadata) if metadata is not None else None
-        
+
         conn.execute(
             """
             INSERT OR IGNORE INTO conversations (id, title, metadata, created_at, updated_at, saved_at)
             VALUES (?, ?, ?, ?, ?, NULL)
             """,
-            (conversation_id, effective_title, meta_json, now, now),
+            (cid, effective_title, meta_json, now, now),
         )
-        
+
         updates = ["title = ?", "updated_at = ?", "saved_at = ?"]
-        params = [effective_title, now, now]
-        
+        params: list[Any] = [effective_title, now, now]
+
         if metadata is not None:
             updates.append("metadata = ?")
             params.append(meta_json)
-            
-        params.append(conversation_id)
-        
+
+        params.append(cid)
+
         conn.execute(
             f"""
             UPDATE conversations
@@ -240,7 +256,7 @@ def _build_fts_query(text: str) -> str | None:
         return None
     parts: list[str] = []
     for t in tokens:
-        safe = t.replace('"', "")
+        safe = t.replace('"', "").replace("'", "")
         if safe:
             parts.append(f'"{safe}"')
     if not parts:
@@ -249,7 +265,11 @@ def _build_fts_query(text: str) -> str | None:
 
 
 class SqliteChatMemory:
-    """SQLite-backed transcript with FTS5 BM25 retrieval."""
+    """SQLite-backed transcript with FTS5 BM25 retrieval.
+
+    Security: All user inputs are validated. Message content is length-limited.
+    Metadata is stored as JSON and validated on read.
+    """
 
     def __init__(
         self,
@@ -261,7 +281,7 @@ class SqliteChatMemory:
         exclude_recent_for_search: int = 24,
     ) -> None:
         self._path = db_path
-        self._conversation_id = conversation_id
+        self._conversation_id = _validate_conversation_id(conversation_id)
         self._max_messages = max_messages
         self._context_search_enabled = context_search_enabled
         self._exclude_recent = max(0, exclude_recent_for_search)
@@ -345,12 +365,13 @@ class SqliteChatMemory:
 
     def append(self, message: ChatMessage) -> None:
         now = _utc_now()
+        validated_content = _validate_message_content(message["content"])
         self._conn.execute(
             """
             INSERT INTO messages (conversation_id, role, content, created_at)
             VALUES (?, ?, ?, ?)
             """,
-            (self._conversation_id, message["role"], message["content"], now),
+            (self._conversation_id, message["role"], validated_content, now),
         )
         self._touch_conversation()
         self._conn.commit()
@@ -398,12 +419,14 @@ class SqliteChatMemory:
         if not row or not row["metadata"]:
             return {}
         try:
-            return json.loads(row["metadata"])
-        except Exception:
+            result = json.loads(str(row["metadata"]))
+            return result if isinstance(result, dict) else {}
+        except (json.JSONDecodeError, TypeError):
             return {}
 
     def set_metadata(self, metadata: dict[str, Any]) -> None:
-        raw = json.dumps(metadata)
+        validated = _validate_metadata_dict(metadata)
+        raw = json.dumps(validated)
         self._conn.execute(
             "UPDATE conversations SET metadata = ?, updated_at = ? WHERE id = ?",
             (raw, _utc_now(), self._conversation_id),
@@ -470,3 +493,29 @@ class SqliteChatMemory:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _validate_metadata_dict(metadata: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        raise ValueError("Metadata must be a dictionary")
+    validated: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str):
+            continue
+        if len(key) > 256:
+            continue
+        if any(ord(ch) < 32 for ch in key):
+            continue
+        if value is not None and not isinstance(value, (str, int, float, bool, list, dict)):
+            continue
+        if isinstance(value, str) and len(value) > 4096:
+            value = value[:4096]
+        if isinstance(value, (list, dict)):
+            try:
+                encoded = json.dumps(value)
+                if len(encoded) > 16384:
+                    continue
+            except (TypeError, ValueError):
+                continue
+        validated[key] = value
+    return validated

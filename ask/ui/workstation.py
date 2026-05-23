@@ -337,6 +337,16 @@ class AskWorkstationApp(App[None]):
         self._dependency_graph = None
         self._workspace_analysis_stage = ""
 
+        from ask.security.rate_limiter import RateLimiter
+        self._rate_limiter = RateLimiter(
+            calls_per_second=5.0,
+            burst_size=10,
+            llm_calls_per_second=1.0,
+            llm_burst=3,
+        )
+        self._consecutive_injections = 0
+        self._max_consecutive_injections = 3
+
     def compose(self) -> ComposeResult:
         yield Static("ASK.AI // LOCAL WORKSTATION // OLLAMA TERMINAL OS", id="topbar")
         with Horizontal(id="workspace"):
@@ -504,8 +514,14 @@ class AskWorkstationApp(App[None]):
                 if self._installed_models:
                     self._add_system_line("available: " + ", ".join(m[0] for m in self._installed_models))
                 return
-            self._active_chat_model = arg
-            self._status_message = f"model switched to {arg}"
+            from ask.security.input_validator import InputValidationError, validate_model_name
+            try:
+                safe_model = validate_model_name(arg)
+            except InputValidationError as exc:
+                self._notice(str(exc))
+                return
+            self._active_chat_model = safe_model
+            self._status_message = f"model switched to {safe_model}"
             
             # Persist globally
             from ask.config import load_settings
@@ -924,9 +940,42 @@ class AskWorkstationApp(App[None]):
             self._notice("no active memory store")
             return
 
-        self._context_tracker.track_topic(text[:80])
+        from ask.security.rate_limiter import RateLimitError
+        try:
+            self._rate_limiter.check_command()
+        except RateLimitError as exc:
+            self._notice(str(exc))
+            return
 
-        base_user = self._plugins.transform_user_message(text)
+        from ask.security.input_validator import InputValidationError, validate_user_message
+        try:
+            safe_text = validate_user_message(text)
+        except InputValidationError as exc:
+            self._notice(str(exc))
+            return
+
+        from ask.security.prompt_injection import analyze_prompt_injection, get_safe_block_response
+        injection = analyze_prompt_injection(safe_text)
+        if injection.should_block(threshold=0.5):
+            self._consecutive_injections += 1
+            if self._consecutive_injections >= self._max_consecutive_injections:
+                self._notice("Multiple blocked attempts detected. Session ended.")
+                self.exit()
+                return
+            self._notice("Message filtered")
+            self._add_system_line(get_safe_block_response())
+            return
+        self._consecutive_injections = 0
+
+        try:
+            self._rate_limiter.check_llm_call()
+        except RateLimitError as exc:
+            self._notice(str(exc))
+            return
+
+        self._context_tracker.track_topic(safe_text[:80])
+
+        base_user = self._plugins.transform_user_message(safe_text)
         task_model = self._router.select_model(base_user, current_model=self._active_chat_model)
         if task_model != self._active_chat_model and self._router.enabled:
             self._active_chat_model = task_model
@@ -1265,7 +1314,9 @@ class AskWorkstationApp(App[None]):
                 suffix = " [stream]" if line.streaming else ""
                 blocks.append(Text(f"ASK.AI{suffix}\n", style=f"bold {GREEN}"))
                 body = line.content or "..."
-                blocks.append(Markdown(body))
+                from ask.security.output_filter import safe_markdown
+                safe_body = safe_markdown(body) if not line.streaming else body
+                blocks.append(Markdown(safe_body))
             else:
                 blocks.append(Text("SYSTEM\n", style=f"bold {MUTED}"))
                 if line.renderable is not None:

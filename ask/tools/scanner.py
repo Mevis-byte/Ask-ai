@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Counter
 
+from ask.security.input_validator import InputValidationError, sanitize_path
 
 _LANGUAGE_BY_SUFFIX = {
     ".py": "Python",
@@ -186,22 +187,13 @@ class DependencyGraph:
         return len(self._imports)
 
 
-_PROJECT_ROOT_KEY_FILES = frozenset({
-    "manage.py", "setup.py", "setup.cfg", "pyproject.toml",
-    "package.json", "go.mod", "Cargo.toml", "Gemfile",
-    "build.gradle", "pom.xml", "CMakeLists.txt",
-    "Makefile", "Rakefile", "Dockerfile",
-    "docker-compose.yml", "docker-compose.yaml",
-    ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile",
-    "README.md", "CONTRIBUTING.md",
-})
-
-
 def scan_project(root: Path) -> ProjectSummary:
     root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise InputValidationError(f"Not a directory: {root}")
+
     languages: Counter[str] = Counter()
     frameworks: set[str] = set()
-    all_imports: list[str] = []
     has_tests = False
     has_docs = False
     has_docker = False
@@ -209,11 +201,8 @@ def scan_project(root: Path) -> ProjectSummary:
     entry_points: list[str] = []
     sample_structure: list[str] = []
     total_files = 0
-
-    for level in range(3):
-        sample_structure.clear()
-
     dir_count = 0
+
     for current, dirs, files in _walk_project(root):
         rel = _safe_rel_path(current, root)
         parts = rel.parts if rel != Path(".") else ()
@@ -229,7 +218,7 @@ def scan_project(root: Path) -> ProjectSummary:
                 continue
             total_files += 1
             suffix = path.suffix.lower()
-            lang = _LANGUAGE_BY_SUFFIX.get(suffix) or _LANGUAGE_BY_SUFFIX.get(f".{name.split('.')[-1].lower()}")
+            lang = _LANGUAGE_BY_SUFFIX.get(suffix)
             if lang:
                 languages[lang] += 1
 
@@ -237,7 +226,10 @@ def scan_project(root: Path) -> ProjectSummary:
             if name_lower in {"setup.py", "pyproject.toml", "main.py", "app.py",
                               "cli.py", "index.js", "index.ts", "server.js",
                               "server.ts", "main.rs", "main.go"}:
-                entry_points.append(str(path.relative_to(root)))
+                try:
+                    entry_points.append(str(path.relative_to(root)))
+                except ValueError:
+                    pass
 
             if "test" in name_lower or name_lower.startswith("test_"):
                 has_tests = True
@@ -294,15 +286,6 @@ def detect_frameworks_from_structure(
 ) -> set[str]:
     frameworks: set[str] = set()
     all_text = " ".join(sample_structure).lower()
-    for framework, imports_needed, key_files in _FRAMEWORK_SIGNATURES:
-        fw_lower = framework.lower()
-        for kf in key_files:
-            if kf.lower() in all_text:
-                frameworks.add(framework)
-                break
-        else:
-            continue
-        break
 
     if "Python" in languages:
         req_file = root / "requirements.txt"
@@ -344,7 +327,11 @@ def detect_frameworks_from_structure(
     return frameworks
 
 
+_SCAN_MAX_IMPORT_LINES = 65536
+
+
 def build_dependency_graph(root: Path) -> DependencyGraph:
+    root = root.expanduser().resolve()
     graph = DependencyGraph()
     for current, _, files in _walk_project(root):
         for name in files:
@@ -353,7 +340,7 @@ def build_dependency_graph(root: Path) -> DependencyGraph:
                 continue
             suffix = path.suffix.lower()
             try:
-                text = path.read_text(encoding="utf-8", errors="replace")[:65536]
+                text = path.read_text(encoding="utf-8", errors="replace")[:_SCAN_MAX_IMPORT_LINES]
             except OSError:
                 continue
             rel = _safe_rel_path(current, root)
@@ -384,7 +371,6 @@ def _safe_rel_path(path: Path, root: Path) -> Path:
 
 def format_project_summary(summary: ProjectSummary) -> str:
     lines: list[str] = []
-    lines.append(f"Project root: {summary.root}")
     lines.append(f"Total files: {summary.total_files}")
     if summary.languages:
         lang_parts = [f"{lang}: {count}" for lang, count in sorted(summary.languages.items(), key=lambda x: -x[1])]

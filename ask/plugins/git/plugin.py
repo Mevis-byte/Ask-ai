@@ -4,42 +4,93 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ask.security.input_validator import (
+    InputValidationError,
+    sanitize_path,
+    validate_pathspec,
+)
+
 
 class GitError(Exception):
     """Raised when a git operation fails."""
 
 
+_GIT_TIMEOUT = 30
+_MAX_PATHSPEC_LENGTH = 512
+
+
 def _find_repo(path: str | None = None) -> Path:
-    start = Path(path or Path.cwd()).expanduser().resolve()
+    """Find git repo root. Only operate within the resolved directory."""
+    start_dir: Path
+    if path is not None:
+        if not isinstance(path, str) or not path.strip():
+            raise GitError("Invalid repo path")
+        try:
+            resolved = sanitize_path(path)
+        except InputValidationError as exc:
+            raise GitError(f"Invalid path: {exc}") from exc
+        start_dir = Path(resolved)
+        if not start_dir.is_dir():
+            raise GitError(f"Not a directory: {start_dir}")
+    else:
+        start_dir = Path.cwd().resolve()
+
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
-            timeout=10,
-            cwd=start,
+            timeout=_GIT_TIMEOUT,
+            cwd=start_dir,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         raise GitError(f"git not found or timeout: {exc}") from exc
     if result.returncode != 0:
         raise GitError("not a git repository")
-    return Path(result.stdout.strip())
+
+    repo_path = Path(result.stdout.strip()).resolve()
+    return repo_path
+
+
+def _validate_git_args(args: list[str]) -> None:
+    """Ensure no dangerous git arguments are present."""
+    dangerous = {"push", "fetch", "pull", "merge", "rebase", "reset",
+                 "commit", "branch", "checkout", "tag", "stash",
+                 "remote", "submodule", "worktree", "config",
+                 "archive", "gc", "prune", "clean", "rm", "mv",
+                 "update-index", "update-ref", "filter-branch",
+                 "init", "clone", "cherry-pick", "revert",
+                 "bisect", "notes"}
+    for arg in args:
+        if arg in dangerous:
+            raise GitError(f"Blocked git command: {arg}")
 
 
 def _git_cmd(args: list[str], repo_path: Path, max_lines: int = 0) -> str:
+    """Execute a read-only git command with validation."""
+    _validate_git_args(args)
+
+    allowed_prefixes = [
+        "status", "diff", "log", "rev-parse", "show",
+        "ls-files", "ls-tree", "describe",
+    ]
+    if args and args[0] not in allowed_prefixes:
+        raise GitError(f"Disallowed git command: {args[0]}")
+
     try:
         result = subprocess.run(
             ["git"] + args,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GIT_TIMEOUT,
             cwd=repo_path,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise GitError(str(exc)) from exc
+        raise GitError("git command failed or timed out") from exc
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        raise GitError(stderr or f"git {' '.join(args)} failed")
+        raise GitError(stderr or "git command returned error")
+
     output = result.stdout
     if max_lines > 0:
         lines = output.splitlines()
@@ -49,7 +100,7 @@ def _git_cmd(args: list[str], repo_path: Path, max_lines: int = 0) -> str:
 
 
 class GitPlugin:
-    """Safe, read-only git operations."""
+    """Safe, read-only git operations with input validation and command allowlisting."""
 
     def __init__(self, repo_path: str | None = None, max_diff_lines: int = 200) -> None:
         self._repo_path: Path | None = None
@@ -90,11 +141,16 @@ class GitPlugin:
         if staged:
             args.append("--cached")
         if pathspec:
-            args.extend(["--", pathspec])
+            try:
+                safe_pathspec = validate_pathspec(pathspec)
+            except InputValidationError as exc:
+                raise GitError(str(exc)) from exc
+            args.extend(["--", safe_pathspec])
         return _git_cmd(args, self._repo_path, max_lines=self._max_diff_lines)
 
     def log(self, max_count: int = 10) -> str:
         self._require_repo()
+        max_count = min(max(1, max_count), 100)
         args = [
             "log",
             f"--max-count={max_count}",
@@ -105,6 +161,7 @@ class GitPlugin:
 
     def log_pretty(self, max_count: int = 5) -> str:
         self._require_repo()
+        max_count = min(max(1, max_count), 50)
         args = [
             "log",
             f"--max-count={max_count}",

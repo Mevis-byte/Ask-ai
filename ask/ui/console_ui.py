@@ -309,9 +309,11 @@ def print_slash_commands_help(self) -> None:
         )
 
     def print_markdown(self, text: str) -> None:
+        from ask.security.output_filter import safe_markdown
+        safe_text = safe_markdown(text)
         self._console.print(
             Panel(
-                Markdown(text),
+                Markdown(safe_text),
                 title=f"[{T.TITLE}]◆ OUTPUT[/]",
                 border_style=T.CYAN,
                 padding=(1, 2),

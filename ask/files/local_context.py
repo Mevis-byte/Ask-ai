@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from ask.rag import Document
+from ask.security.input_validator import InputValidationError, sanitize_path
 
 IGNORED_DIR_NAMES = {
     ".git",
@@ -124,9 +126,36 @@ def _one_line(text: str, *, limit: int = 120) -> str:
         return clean
     return clean[: max(0, limit - 3)] + "..."
 
+def _resolve_against_project(target: str, project_root: Path) -> Path:
+    """Securely resolve a user-supplied path against the project root.
+
+    - Blocks path traversal (..)
+    - Blocks symlink escape via multiple checks
+    - Resolves the real path and verifies it stays inside project boundary
+    """
+    expanded = os.path.expanduser(target.strip())
+    candidate = Path(expanded)
+
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        resolved = (project_root / candidate).resolve()
+
+    if not _is_relative_to(resolved, project_root):
+        raise LocalFileAccessError(
+            f"Path resolved outside project boundary: {resolved}"
+        )
+
+    if resolved.is_symlink():
+        real = resolved.resolve(strict=False)
+        if real != resolved and not _is_relative_to(real, project_root):
+            raise LocalFileAccessError("Symlink target is outside project boundary")
+
+    return resolved
+
 
 class LocalFileContext:
-    """Read-only, project-bounded file context for chat and future retrieval."""
+    """Read-only, project-bounded file context with path traversal protection."""
 
     def __init__(
         self,
@@ -138,10 +167,11 @@ class LocalFileContext:
         max_attachments: int = DEFAULT_MAX_ATTACHMENTS,
         max_find_results: int = DEFAULT_MAX_FIND_RESULTS,
     ) -> None:
-        self._project_root = (project_root or Path.cwd()).expanduser().resolve()
-        if not self._project_root.is_dir():
-            raise LocalFileAccessError(f"project root is not a directory: {self._project_root}")
-        self._active_root = self._project_root
+        root = (project_root or Path.cwd()).expanduser().resolve()
+        if not root.is_dir():
+            raise LocalFileAccessError(f"project root is not a directory: {root}")
+        self._project_root = root
+        self._active_root = root
         self._max_file_bytes = max_file_bytes
         self._max_find_file_bytes = max_find_file_bytes
         self._max_prompt_chars = max_prompt_chars
@@ -203,9 +233,11 @@ class LocalFileContext:
         )
 
     def read_file(self, file_name: str) -> FileReadResult:
-        path = self._resolve_file(file_name)
+        path = _resolve_against_project(file_name, self._active_root)
         if self._should_skip_file(path):
             raise LocalFileAccessError(f"file is blocked or ignored: {self._display_path(path)}")
+        if not path.is_file():
+            raise LocalFileAccessError(f"not a readable file: {file_name}")
         result = self._read_text_file(path, max_bytes=self._max_file_bytes)
         self._add_attachment(
             source=f"file:{result.display_path}",
@@ -214,10 +246,8 @@ class LocalFileContext:
         return result
 
     def find(self, pattern: str) -> FileFindResult:
-        query = pattern.strip()
-        if len(query) < 2:
-            raise LocalFileAccessError("find pattern must be at least 2 characters")
-
+        from ask.security.input_validator import validate_search_pattern
+        query = validate_search_pattern(pattern)
         needle = query.lower()
         matches: list[FileFindMatch] = []
         scanned = 0
@@ -297,7 +327,6 @@ class LocalFileContext:
         return "\n".join(parts)
 
     def to_documents(self) -> list[Document]:
-        """Expose selected local context in the same shape expected by RAG retrievers."""
         return [Document(text=item.text, source=item.source) for item in self._attachments]
 
     def clear(self) -> None:
@@ -306,37 +335,12 @@ class LocalFileContext:
     def _resolve_context_folder(self, folder: str) -> Path:
         if not folder.strip():
             raise LocalFileAccessError("usage: /context <folder>")
-        raw = Path(folder).expanduser()
-        candidate = raw if raw.is_absolute() else self._project_root / raw
-        path = candidate.resolve()
-        self._ensure_inside_project(path)
-        if not path.is_dir():
+        resolved = _resolve_against_project(folder, self._project_root)
+        if not resolved.is_dir():
             raise LocalFileAccessError(f"context is not a folder: {folder}")
-        if self._has_ignored_part(path):
-            raise LocalFileAccessError(f"context folder is ignored: {self._display_path(path)}")
-        return path
-
-    def _resolve_file(self, file_name: str) -> Path:
-        if not file_name.strip():
-            raise LocalFileAccessError("file path required")
-        raw = Path(file_name).expanduser()
-        candidate = raw if raw.is_absolute() else self._active_root / raw
-        path = candidate.resolve()
-        self._ensure_inside_active_root(path)
-        if not path.is_file():
-            raise LocalFileAccessError(f"not a readable file: {file_name}")
-        return path
-
-    def _ensure_inside_project(self, path: Path) -> None:
-        if not _is_relative_to(path, self._project_root):
-            raise LocalFileAccessError(
-                f"outside project boundary: {path}. Launch ask from that project to access it."
-            )
-
-    def _ensure_inside_active_root(self, path: Path) -> None:
-        self._ensure_inside_project(path)
-        if not _is_relative_to(path, self._active_root):
-            raise LocalFileAccessError(f"outside active context: {path}")
+        if self._has_ignored_part(resolved):
+            raise LocalFileAccessError(f"context folder is ignored: {self._display_path(resolved)}")
+        return resolved
 
     def _display_path(self, path: Path) -> str:
         try:
@@ -357,7 +361,11 @@ class LocalFileContext:
             files: list[str] = []
             for entry in entries:
                 if entry.is_symlink():
-                    continue
+                    if entry.is_dir():
+                        continue
+                    real_path = entry.resolve(strict=False)
+                    if not _is_relative_to(real_path, self._project_root):
+                        continue
                 if entry.is_dir():
                     dirs.append(entry.name)
                 elif entry.is_file():
@@ -391,9 +399,10 @@ class LocalFileContext:
 
     def _read_text_file(self, path: Path, *, max_bytes: int) -> FileReadResult:
         try:
-            size = path.stat().st_size
+            stat_result = path.stat()
+            size = stat_result.st_size
         except OSError as exc:
-            raise LocalFileAccessError(f"cannot stat file: {self._display_path(path)}") from exc
+            raise LocalFileAccessError("cannot stat file") from exc
         if size <= 0:
             return FileReadResult(path, self._display_path(path), "", 0, False)
         read_limit = min(size, max_bytes)
@@ -401,9 +410,9 @@ class LocalFileContext:
             with path.open("rb") as handle:
                 data = handle.read(read_limit)
         except OSError as exc:
-            raise LocalFileAccessError(f"cannot read file: {self._display_path(path)}") from exc
+            raise LocalFileAccessError("cannot read file") from exc
         if b"\x00" in data:
-            raise LocalFileAccessError(f"binary file blocked: {self._display_path(path)}")
+            raise LocalFileAccessError("binary file blocked")
         text = data.decode("utf-8", errors="replace")
         return FileReadResult(
             path=path,
@@ -416,7 +425,7 @@ class LocalFileContext:
     def _add_attachment(self, *, source: str, text: str) -> None:
         self._attachments.append(_ContextAttachment(source=source, text=text))
         if len(self._attachments) > self._max_attachments:
-            self._attachments = self._attachments[-self._max_attachments :]
+            self._attachments = self._attachments[-self._max_attachments:]
 
     @staticmethod
     def _context_summary_text(summary: ContextSummary) -> str:
