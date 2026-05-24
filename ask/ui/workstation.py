@@ -31,7 +31,7 @@ class CommandSuggester(Suggester):
             "/help", "/workspace", "/context", "/clear-context", "/read",
             "/explain", "/summarize", "/review", "/find", "/git-status",
             "/git-diff", "/git-log", "/git-review", "/explain-commit", "/generate-commit",
-            "/new", "/save", "/sessions", "/session", "/resume", "/clear",
+            "/new", "/save", "/sessions", "/session", "/resume", "/clear", "/history",
             "/quit", "/save-file", "/export", "/copy", "/print", "/model",
             "/models", "/baseurl"
         ]
@@ -75,7 +75,13 @@ class CommandSuggester(Suggester):
         return results
 
 from ask.app.chat import inject_memory_snippets
-from ask.app.session_manager import ChatSessionManager, SessionInfo, derive_session_title
+from ask.app.session_manager import (
+    ChatSessionManager,
+    SessionInfo,
+    _format_relative_time,
+    derive_session_title,
+    generate_session_title,
+)
 from ask.config import Settings, save_user_settings
 from ask.files import (
     ContextSummary,
@@ -175,7 +181,7 @@ class AskWorkstationApp(App[None]):
     }}
 
     #sessions-pane {{
-        width: 31;
+        width: 36;
     }}
 
     #chat-pane {{
@@ -494,6 +500,7 @@ class AskWorkstationApp(App[None]):
                         "/sessions          list saved sessions",
                         "/session <id|num>  switch to a session",
                         "/resume <id|num>   alias for /session",
+                        "/history [query]   search session history by title/keyword",
                         "/clear             clear current session transcript",
                         "── export ──",
                         "/save-file <path>  save last response to a file",
@@ -567,6 +574,32 @@ class AskWorkstationApp(App[None]):
             save_user_settings(updated)
             
             self._refresh_ollama_status()
+            return
+        if command == "/history":
+            if not arg:
+                sessions = self._session_manager.list_sessions()
+                if not sessions:
+                    self._add_system_line("no sessions yet")
+                    return
+                lines = ["sessions:"]
+                for idx, s in enumerate(sessions[:25], start=1):
+                    active = "*" if s.id == self._session_id else " "
+                    rel = _format_relative_time(s.updated_at)
+                    title = s.title if s.title else "New Session"
+                    lines.append(f"{active} {idx}. {title}  ({rel}, {s.message_count} msgs)")
+                self._add_system_line("\n".join(lines))
+            else:
+                matches = self._session_manager.find_sessions(arg)
+                if not matches:
+                    self._add_system_line(f"no sessions matching: {arg}")
+                    return
+                lines = [f"sessions matching \"{arg}\":"]
+                for idx, s in enumerate(matches[:25], start=1):
+                    active = "*" if s.id == self._session_id else " "
+                    rel = _format_relative_time(s.updated_at)
+                    title = s.title if s.title else "New Session"
+                    lines.append(f"{active} {idx}. {title}  ({rel}, {s.message_count} msgs)")
+                self._add_system_line("\n".join(lines))
             return
         if command == "/new":
             self.action_new_session()
@@ -1137,6 +1170,8 @@ class AskWorkstationApp(App[None]):
         if error:
             self._ollama_status = "error"
             self._ollama_error = error
+        if not error:
+            self._auto_generate_session_title()
         self._refresh_all()
         if not error and index < len(self._chat_lines):
             text = self._chat_lines[index].content
@@ -1147,35 +1182,82 @@ class AskWorkstationApp(App[None]):
         self._close_current_memory()
         self._session_id = session_id
         self._memory = self._session_manager.memory_for(session_id)
-        
         # Load session-specific model if available
         meta = self._memory.get_metadata()
         if "chat_model" in meta:
             self._active_chat_model = str(meta["chat_model"])
-        
         self._chat_lines = [
             ChatLine(role=message["role"], content=message["content"])
             for message in self._memory.get()
         ]
         if announce:
-            self._add_system_line(f"session opened: {session_id}")
-        self._status_message = f"session {session_id}"
+            session_title = self._session_title_for(session_id)
+            self._add_system_line(f"opened: {session_title}")
+        session_title = self._session_title_for(session_id)
+        self._status_message = f"session: {session_title}"
         self._refresh_all()
+
+    def _session_title_for(self, session_id: str) -> str:
+        for s in self._session_manager.list_sessions():
+            if s.id == session_id:
+                return s.title if s.title else "New Session"
+        return session_id
+
+    def _auto_generate_session_title(self) -> None:
+        """Generate or update the session title based on conversation content.
+        
+        Triggers after 2+ messages. Uses the first user message to derive
+        a concise technical title. Only updates if the title is a default/untitled one.
+        """
+        user_msgs = [m for m in self._chat_lines if m.role == "user"]
+        if len(user_msgs) < 2:
+            return
+
+        current_title = ""
+        for s in self._session_manager.list_sessions():
+            if s.id == self._session_id:
+                current_title = s.title
+                break
+
+        # Only auto-title if title is default/empty/untitled/or matches a session ID pattern
+        if current_title:
+            lower = current_title.lower()
+            _default_phrases = {"new session", "untitled session", "default", ""}
+            if lower not in _default_phrases and not lower.startswith("session "):
+                return
+
+        messages_for_title = [
+            {"role": m.role, "content": m.content} for m in user_msgs
+        ]
+        title = generate_session_title(messages_for_title)
+        if title and title != current_title:
+            self._session_manager.update_session_title(self._session_id, title)
+            self._refresh_all()
+            self._status_message = f"session: {title}"
 
     def _switch_session_from_arg(self, arg: str) -> None:
         if self._streaming:
             self._notice("stream active; finish current response before switching sessions")
             return
+        all_sessions = self._session_manager.list_sessions()
         session_id = arg
         if arg.isdigit():
             index = int(arg) - 1
-            if 0 <= index < len(self._displayed_sessions):
-                session_id = self._displayed_sessions[index].id
-        known = {session.id for session in self._session_manager.list_sessions()}
-        if session_id not in known:
-            self._notice(f"session not found: {arg}")
+            if 0 <= index < len(all_sessions):
+                session_id = all_sessions[index].id
+        known = {s.id for s in all_sessions}
+        if session_id in known:
+            self._open_session(session_id, announce=True)
             return
-        self._open_session(session_id, announce=True)
+
+        # Try matching by title (substring, case-insensitive)
+        q = arg.strip().lower()
+        for s in all_sessions:
+            if q in s.title.lower() or q in s.id.lower():
+                self._open_session(s.id, announce=True)
+                return
+
+        self._notice(f"session not found: {arg}")
 
     def _save_current_session(self, *, title: str | None = None) -> None:
         if self._streaming:
@@ -1267,15 +1349,19 @@ class AskWorkstationApp(App[None]):
     def _render_sessions(self) -> RenderableType:
         lines = Text()
         lines.append("SESSIONS / HISTORY\n", style=f"bold {AMBER}")
-        lines.append("Ctrl+N new  Ctrl+S save\n\n", style=MUTED)
+        lines.append("Ctrl+N new  Ctrl+S save  /history\n\n", style=MUTED)
         if not self._displayed_sessions:
             lines.append("no sessions\n", style=MUTED)
         for index, session in enumerate(self._displayed_sessions[:12], start=1):
             active = ">" if session.id == self._session_id else " "
             saved = "S" if session.saved_at else "."
             style = AMBER if session.id == self._session_id else BEIGE
-            lines.append(f"{active}{index:02d} [{saved}] {session.title}\n", style=style)
-            lines.append(f"    {session.message_count} msgs  {session.id}\n", style=MUTED)
+            rel_time = _format_relative_time(session.updated_at)
+            title = session.title if session.title else "New Session"
+            model = session.metadata.get("chat_model", "")
+            model_suffix = f"  [{model}]" if model else ""
+            lines.append(f"{active}{index:02d} [{saved}] {title}{model_suffix}\n", style=style)
+            lines.append(f"    {session.message_count} msgs  {rel_time}\n", style=MUTED)
 
         recent = [line for line in self._chat_lines if line.role != "system"][-5:]
         lines.append("\nCURRENT TRACE\n", style=f"bold {GREEN}")
@@ -1340,7 +1426,8 @@ class AskWorkstationApp(App[None]):
         table.add_row(Text("stream", style=MUTED), Text("active" if self._streaming else "idle", style=GREEN))
         table.add_row(Text("ollama", style=MUTED), Text(self._ollama_label(), style=self._ollama_style()))
         table.add_row(Text("host", style=MUTED), Text(self._backend.host, style=BEIGE))
-        table.add_row(Text("session", style=MUTED), Text(self._session_id, style=BEIGE))
+        session_label = self._session_title_for(self._session_id)
+        table.add_row(Text("session", style=MUTED), Text(session_label, style=BEIGE))
 
         if self._project_summary:
             proj = self._project_summary
@@ -1414,7 +1501,9 @@ class AskWorkstationApp(App[None]):
         for index, session in enumerate(self._session_manager.list_sessions(), start=1):
             active = "*" if session.id == self._session_id else " "
             saved = "saved" if session.saved_at else "open"
-            lines.append(f"{active} {index}. {session.id}  {session.title}  {saved}")
+            rel = _format_relative_time(session.updated_at)
+            title = session.title if session.title else "New Session"
+            lines.append(f"{active} {index}. {title}  ({rel})  [{saved}]")
         return lines
 
     def _memory_label(self) -> str:

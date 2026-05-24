@@ -7,6 +7,9 @@ from ask.memory.sqlite_memory import (
     ensure_sqlite_memory_db,
     list_conversations,
     mark_conversation_saved,
+    search_conversations,
+    update_conversation_summary,
+    update_conversation_title,
 )
 from ask.memory.types import ChatMessage
 
@@ -20,4 +23,7 @@ __all__ = [
     "ensure_sqlite_memory_db",
     "list_conversations",
     "mark_conversation_saved",
+    "search_conversations",
+    "update_conversation_summary",
+    "update_conversation_title",
 ]

@@ -64,6 +64,7 @@ _MAX_MESSAGE_CONTENT_LENGTH = 1048576
 class ConversationSummary:
     id: str
     title: str
+    summary: str
     metadata: dict[str, Any]
     created_at: str
     updated_at: str
@@ -119,7 +120,12 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 def _ensure_conversation_columns(conn: sqlite3.Connection) -> None:
     columns = _conversation_columns(conn)
-    for col, default in [("title", "TEXT"), ("metadata", "TEXT DEFAULT '{}'"), ("saved_at", "TEXT")]:
+    for col, default in [
+        ("title", "TEXT"),
+        ("summary", "TEXT DEFAULT ''"),
+        ("metadata", "TEXT DEFAULT '{}'"),
+        ("saved_at", "TEXT"),
+    ]:
         if col not in columns:
             try:
                 conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {default}")
@@ -159,11 +165,13 @@ def list_conversations(db_path: Path) -> list[ConversationSummary]:
         title_expr = "COALESCE(NULLIF(c.title, ''), c.id)" if "title" in columns else "c.id"
         meta_expr = "c.metadata" if "metadata" in columns else "'{}'"
         saved_expr = "c.saved_at" if "saved_at" in columns else "NULL"
+        summary_expr = "c.summary" if "summary" in columns else "''"
         rows = conn.execute(
             f"""
             SELECT
                 c.id,
                 {title_expr} AS title,
+                {summary_expr} AS summary,
                 {meta_expr} AS metadata,
                 c.created_at,
                 c.updated_at,
@@ -189,6 +197,7 @@ def list_conversations(db_path: Path) -> list[ConversationSummary]:
                 ConversationSummary(
                     id=str(row["id"]),
                     title=str(row["title"]),
+                    summary=str(row["summary"]) if row["summary"] else "",
                     metadata=meta,
                     created_at=str(row["created_at"]),
                     updated_at=str(row["updated_at"]),
@@ -248,6 +257,73 @@ def mark_conversation_saved(
         conn.commit()
     finally:
         conn.close()
+
+
+def update_conversation_title(db_path: Path, conversation_id: str, title: str) -> None:
+    cid = _validate_conversation_id(conversation_id)
+    title = title.strip()
+    if not title:
+        return
+    if len(title) > 512:
+        title = title[:512]
+    now = _utc_now()
+    ensure_sqlite_memory_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO conversations (id, title, metadata, created_at, updated_at, saved_at)
+               VALUES (?, ?, '{}', ?, ?, NULL)""",
+            (cid, title, now, now),
+        )
+        conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title, now, cid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_conversation_summary(db_path: Path, conversation_id: str, summary: str) -> None:
+    cid = _validate_conversation_id(conversation_id)
+    summary = summary.strip()
+    if not summary:
+        return
+    if len(summary) > 2048:
+        summary = summary[:2048]
+    now = _utc_now()
+    ensure_sqlite_memory_db(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """INSERT OR IGNORE INTO conversations (id, title, metadata, created_at, updated_at, saved_at)
+               VALUES (?, ?, '{}', ?, ?, NULL)""",
+            (cid, cid, now, now),
+        )
+        conn.execute(
+            "UPDATE conversations SET summary = ?, updated_at = ? WHERE id = ?",
+            (summary, now, cid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def search_conversations(db_path: Path, query: str) -> list[ConversationSummary]:
+    all_convos = list_conversations(db_path)
+    if not query.strip():
+        return all_convos
+    q = query.strip().lower()
+    tokens = q.split()
+    results: list[ConversationSummary] = []
+    seen: set[str] = set()
+    for convo in all_convos:
+        haystack = (convo.title + " " + convo.summary).lower()
+        if all(t in haystack for t in tokens):
+            if convo.id not in seen:
+                results.append(convo)
+                seen.add(convo.id)
+    return results
 
 
 def _build_fts_query(text: str) -> str | None:

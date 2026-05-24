@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ask.config import Settings
 from ask.memory import (
@@ -11,6 +13,9 @@ from ask.memory import (
     SqliteChatMemory,
     list_conversations,
     mark_conversation_saved,
+    search_conversations,
+    update_conversation_summary,
+    update_conversation_title,
 )
 
 
@@ -18,6 +23,7 @@ from ask.memory import (
 class SessionInfo:
     id: str
     title: str
+    summary: str
     metadata: dict[str, Any]
     created_at: str
     updated_at: str
@@ -29,6 +35,7 @@ class SessionInfo:
 @dataclass
 class _RamSession:
     title: str
+    summary: str
     metadata: dict[str, Any]
     created_at: str
     updated_at: str
@@ -58,7 +65,68 @@ def derive_session_title(text: str) -> str:
     clean = " ".join(text.split())
     if not clean:
         return "Untitled Session"
-    return clean[:44] + ("..." if len(clean) > 44 else "")
+    return clean[:50] + ("..." if len(clean) > 50 else "")
+
+
+def generate_session_title(messages: list[dict[str, str]]) -> str:
+    """Generate a concise technical title from conversation messages.
+
+    Uses the first user message content, cleaned and truncated intelligently.
+    Attempts to extract the core technical topic from the opening line.
+    """
+    user_msgs = [m for m in messages if m.get("role") == "user"]
+    if not user_msgs:
+        return "New Session"
+
+    first = user_msgs[0].get("content", "").strip()
+    first_line = first.split("\n")[0].strip()
+
+    clean = " ".join(first_line.split())
+    if not clean:
+        return "New Session"
+
+    # Strip leading articles and common prefixes
+    clean = re.sub(r"^(can you|how (do|can|would|should) (i|we)|what is|what are|explain|describe|tell me about)\s+", "", clean, flags=re.IGNORECASE)
+    clean = clean.strip().strip("?").strip()
+
+    if len(clean) <= 50:
+        return clean
+
+    # Try to truncate at a natural boundary
+    truncated = clean[:50]
+    # Cut at last space if possible
+    last_space = truncated.rfind(" ")
+    if last_space > 25:
+        truncated = truncated[:last_space]
+    return truncated + "..."
+
+
+def _format_relative_time(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to a human-friendly relative string."""
+    try:
+        dt = datetime.fromisoformat(iso_timestamp)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        diff = now - dt
+        seconds = diff.total_seconds()
+        if seconds < 0:
+            return "just now"
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            m = int(seconds // 60)
+            return f"{m}m ago"
+        if seconds < 86400:
+            h = int(seconds // 3600)
+            return f"{h}h ago"
+        if seconds < 604800:
+            d = int(seconds // 86400)
+            return f"{d}d ago"
+        if seconds < 2592000:
+            w = int(seconds // 604800)
+            return f"{w}w ago"
+        return dt.strftime("%b %d")
+    except (ValueError, TypeError):
+        return ""
 
 
 class ChatSessionManager:
@@ -101,6 +169,7 @@ class ChatSessionManager:
             memory.set_metadata(meta)
             self._ram_sessions[sid] = _RamSession(
                 title=label,
+                summary="",
                 metadata=meta,
                 created_at=now,
                 updated_at=now,
@@ -140,6 +209,7 @@ class ChatSessionManager:
             SessionInfo(
                 id=item.id,
                 title=item.title,
+                summary=item.summary,
                 metadata=item.metadata,
                 created_at=item.created_at,
                 updated_at=item.updated_at,
@@ -181,6 +251,45 @@ class ChatSessionManager:
             return
         self._ram_sessions[session_id].updated_at = _utc_now()
 
+    def update_session_title(self, session_id: str, title: str) -> None:
+        if not title or not title.strip():
+            return
+        title = title.strip()[:128]
+        if self._path is None:
+            if session_id in self._ram_sessions:
+                self._ram_sessions[session_id].title = title
+            return
+        update_conversation_title(self._path, session_id, title)
+
+    def update_session_summary(self, session_id: str, summary: str) -> None:
+        if not summary or not summary.strip():
+            return
+        summary = summary.strip()[:1024]
+        if self._path is None:
+            if session_id in self._ram_sessions:
+                self._ram_sessions[session_id].summary = summary
+            return
+        update_conversation_summary(self._path, session_id, summary)
+
+    def find_sessions(self, query: str) -> list[SessionInfo]:
+        all_sessions = self.list_sessions()
+        if not query.strip():
+            return all_sessions
+        q = query.strip().lower()
+        results: list[SessionInfo] = []
+        seen: set[str] = set()
+        for s in all_sessions:
+            haystack = (s.title + " " + s.summary + " " + s.id).lower()
+            if q in haystack:
+                if s.id not in seen:
+                    results.append(s)
+                    seen.add(s.id)
+        return results
+
+    @staticmethod
+    def generate_title(messages: list[dict[str, str]]) -> str:
+        return generate_session_title(messages)
+
     def _session_info_for_id(self, session_id: str, *, fallback_title: str) -> SessionInfo:
         for item in self.list_sessions():
             if item.id == session_id:
@@ -189,6 +298,8 @@ class ChatSessionManager:
         return SessionInfo(
             id=session_id,
             title=fallback_title,
+            summary="",
+            metadata={},
             created_at=now,
             updated_at=now,
             saved_at=None,
@@ -201,6 +312,8 @@ class ChatSessionManager:
         return SessionInfo(
             id=session_id,
             title=meta.title,
+            summary=meta.summary,
+            metadata=meta.metadata,
             created_at=meta.created_at,
             updated_at=meta.updated_at,
             saved_at=meta.saved_at,

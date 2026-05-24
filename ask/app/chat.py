@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ask.config import Settings, save_user_settings
 from ask.memory import ChatMemory
+from ask.memory.sqlite_memory import update_conversation_title
 from ask.models import OllamaChatBackend
 from ask.plugins import PluginRegistry
 from ask.rag import Retriever, augment_user_message
@@ -23,6 +24,7 @@ from ask.security.prompt_injection import (
     get_safe_block_response,
 )
 from ask.security.rate_limiter import RateLimiter, RateLimitError
+from ask.app.session_manager import generate_session_title
 from ask.streaming import collect_stream_text, iter_ollama_text_deltas
 from ask.tools.scanner import build_dependency_graph, format_dependency_context, scan_project
 from ask.tools.memory_tracker import ContextTracker
@@ -297,6 +299,15 @@ class ChatApplication:
                 self._memory.append({"role": "user", "content": base_user})
                 self._memory.append({"role": "assistant", "content": full})
                 self._plugins.notify_assistant(full)
+
+                if not hasattr(self, '_msg_count'):
+                    self._msg_count = 0
+                self._msg_count += 1
+                if hasattr(self._memory, '_path') and self._msg_count == 2:
+                    current = self._memory.get()
+                    title = generate_session_title(current)
+                    if title:
+                        update_conversation_title(self._memory._path, "default", title)
 
             except KeyboardInterrupt:
                 now = time.time()
