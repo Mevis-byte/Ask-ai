@@ -82,6 +82,7 @@ from ask.app.session_manager import (
     derive_session_title,
     generate_session_title,
 )
+from ask.ui.home_screen import HomeScreen
 from ask.config import Settings, save_user_settings
 from ask.files import (
     ContextSummary,
@@ -111,15 +112,7 @@ from ask.tools.scanner import (
 )
 from ask.tools.memory_tracker import ContextTracker
 
-AMBER = "#c49a52"
-GREEN = "#7f9f6b"
-BEIGE = "#d6c6a8"
-MUTED = "#837a62"
-DIM = "#5f6b52"
-BG = "#090b08"
-PANE = "#10130d"
-PANE_ALT = "#15170f"
-ERROR = "#c16b5c"
+from ask.ui.colors import AMBER, BEIGE, BG, DIM, ERROR, GREEN, MUTED, PANE, PANE_ALT
 
 
 @dataclass
@@ -226,6 +219,7 @@ class AskWorkstationApp(App[None]):
         Binding("ctrl+s", "save_session", "Save Session"),
         Binding("ctrl+y", "copy_last_response", "Copy Last Response"),
         Binding("ctrl+c", "quit_request", "Exit"),
+        Binding("ctrl+p", "open_command_palette", "Command Palette"),
     ]
 
     TITLE = "ask.ai workstation"
@@ -370,9 +364,10 @@ class AskWorkstationApp(App[None]):
     def on_mount(self) -> None:
         self._session_id = self._session_manager.initial_session_id()
         self._open_session(self._session_id, announce=False)
-        self.query_one("#command-input", Input).focus()
         self._refresh_ollama_status()
         self.set_interval(30, self._refresh_ollama_status)
+
+        self.push_screen(HomeScreen())
 
         # Auto-detect project in current directory
         try:
@@ -442,6 +437,15 @@ class AskWorkstationApp(App[None]):
         widget_id = self._focus_order[self._focus_index]
         self.query_one(f"#{widget_id}").focus()
 
+    def action_open_command_palette(self) -> None:
+        from ask.ui.ask_command_palette import CommandPalette
+        def on_palette_dismissed(result: str | None) -> None:
+            if result:
+                inp = self.query_one("#command-input", Input)
+                inp.value = result
+                inp.focus()
+        self.push_screen(CommandPalette(self), on_palette_dismissed)
+
     def action_new_session(self) -> None:
         if self._streaming:
             self._notice("stream active; finish current response before creating a session")
@@ -456,6 +460,27 @@ class AskWorkstationApp(App[None]):
         session = self._session_manager.create_session()
         self._open_session(session.id, announce=True)
         # self._active_chat_model is already set and will carry over
+
+    def _show_session_picker(self) -> None:
+        from ask.ui.pickers import SessionPicker
+        def on_pick(result: str | None) -> None:
+            if result:
+                self._switch_session_from_arg(result)
+        self.push_screen(SessionPicker(self, callback=on_pick))
+
+    def _show_model_picker(self) -> None:
+        from ask.ui.pickers import ModelPicker
+        def on_pick(result: str | None) -> None:
+            if result:
+                self._handle_command(f"/model {result}")
+        self.push_screen(ModelPicker(self, callback=on_pick))
+
+    def _show_workspace_picker(self) -> None:
+        from ask.ui.pickers import WorkspacePicker
+        def on_pick(result: str | None) -> None:
+            if result:
+                self._handle_command(f"/workspace {result}")
+        self.push_screen(WorkspacePicker(self, callback=on_pick))
 
     def action_quit_request(self) -> None:
         import time
@@ -517,9 +542,7 @@ class AskWorkstationApp(App[None]):
             return
         if command == "/model":
             if not arg:
-                self._add_system_line(f"current model: {self._active_chat_model}")
-                if self._installed_models:
-                    self._add_system_line("available: " + ", ".join(m[0] for m in self._installed_models))
+                self._show_model_picker()
                 return
             from ask.security.input_validator import InputValidationError, validate_model_name
             try:
@@ -612,11 +635,14 @@ class AskWorkstationApp(App[None]):
             return
         if command == "/session":
             if not arg:
-                self._add_system_line("usage: /session <id|number>")
+                self._show_session_picker()
                 return
             self._switch_session_from_arg(arg)
             return
         if command in ("/context", "/workspace"):
+            if not arg and command == "/workspace":
+                self._show_workspace_picker()
+                return
             self._handle_context_command(arg)
             return
         if command in ("/clear-context", "/clear-workspace"):

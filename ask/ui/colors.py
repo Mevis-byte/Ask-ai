@@ -1,0 +1,11 @@
+"""Hex color constants used throughout the ASK.AI TUI."""
+
+AMBER = "#c49a52"
+GREEN = "#7f9f6b"
+BEIGE = "#d6c6a8"
+MUTED = "#837a62"
+DIM = "#5f6b52"
+BG = "#090b08"
+PANE = "#10130d"
+PANE_ALT = "#15170f"
+ERROR = "#c16b5c"
