@@ -157,16 +157,14 @@ PickerScreen {{
             self._select(focused.picker_value)
 
     def _select(self, value: str) -> None:
+        self.dismiss(value)
         if self._callback:
             self._callback(value)
-        else:
-            self.dismiss(value)
 
     def action_close_picker(self) -> None:
+        self.dismiss(None)
         if self._callback:
             self._callback(None)
-        else:
-            self.dismiss(None)
 
 
 class SessionPicker(PickerScreen):
@@ -188,16 +186,22 @@ class ModelPicker(PickerScreen):
             label = f"{name}  ({size})"
             items.append((label, name))
         if not items:
-            items.append(("(no models found)", ""))
+            items.append(("(no models found - run Ollama or /models)", ""))
         super().__init__(app_ref, "SWITCH MODEL", items, callback)
 
 
 class WorkspacePicker(PickerScreen):
     def __init__(self, app_ref: AskWorkstationApp, callback: Any = None) -> None:
-        import os
         items: list[tuple[str, str]] = [("Current Directory", ".")]
         extra = getattr(app_ref, "_workspace_history", None)
         if extra:
             for w in extra:
                 items.append((w, w))
+        root = app_ref._file_context.project_root
+        try:
+            for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+                if child.is_dir() and not child.name.startswith("."):
+                    items.append((child.name, child.name))
+        except OSError:
+            pass
         super().__init__(app_ref, "SELECT WORKSPACE", items, callback)

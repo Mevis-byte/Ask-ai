@@ -9,6 +9,7 @@ setup(
         "rich",
         "ollama",
         "pyfiglet",
+        "rapidfuzz>=3.0.0",
         "textual>=0.85.0",
     ],
     extras_require={

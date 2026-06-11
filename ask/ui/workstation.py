@@ -20,6 +20,8 @@ from textual.widgets import Input, Static
 from textual.suggester import Suggester
 from textual import events
 
+from ask.ui.command_catalog import command_help_lines, command_names
+
 
 class CommandSuggester(Suggester):
     """Provides autocomplete suggestions for commands and models with stable cycling."""
@@ -27,14 +29,7 @@ class CommandSuggester(Suggester):
     def __init__(self, app: 'AskWorkstationApp') -> None:
         super().__init__(use_cache=False)
         self.app = app
-        self.commands = [
-            "/help", "/workspace", "/context", "/clear-context", "/read",
-            "/explain", "/summarize", "/review", "/find", "/git-status",
-            "/git-diff", "/git-log", "/git-review", "/explain-commit", "/generate-commit",
-            "/new", "/save", "/sessions", "/session", "/resume", "/clear", "/history",
-            "/quit", "/save-file", "/export", "/copy", "/print", "/model",
-            "/models", "/baseurl"
-        ]
+        self.commands = command_names()
         self._last_index = 0
 
     def cycle(self) -> None:
@@ -331,6 +326,8 @@ class AskWorkstationApp(App[None]):
         self._command_history: list[str] = []
         self._history_index: int = -1
         self._current_typing_buffer: str = ""
+        self._workspace_history: list[str] = []
+        self._title_generation_inflight: set[str] = set()
 
         self._context_tracker = ContextTracker()
         self._project_summary: ProjectSummary | None = None
@@ -441,9 +438,15 @@ class AskWorkstationApp(App[None]):
         from ask.ui.ask_command_palette import CommandPalette
         def on_palette_dismissed(result: str | None) -> None:
             if result:
-                inp = self.query_one("#command-input", Input)
-                inp.value = result
-                inp.focus()
+                if result.endswith(" "):
+                    inp = self.query_one("#command-input", Input)
+                    inp.value = result
+                    inp.cursor_position = len(result)
+                    inp.focus()
+                elif result.startswith("/"):
+                    self._handle_command(result)
+                else:
+                    self._submit_user_message(result)
         self.push_screen(CommandPalette(self), on_palette_dismissed)
 
     def action_new_session(self) -> None:
@@ -502,40 +505,9 @@ class AskWorkstationApp(App[None]):
         if command in ("/help", "/?"):
             self._add_system_line(
                 "\n".join(
-                    [
-                        "── workspace ──",
-                        "/workspace <dir>   load project folder as context",
-                        "/context           show current context summary",
-                        "/clear-context     clear loaded workspace context",
-                        "/read <file>       display raw file with syntax highlighting",
-                        "/explain <file>    explain file architecture and logic",
-                        "/summarize <file>  short file overview",
-                        "/review <file>     code review for risks and improvements",
-                        "/find <pattern>    search active context and attach matches",
-                        "── git ──",
-                        "/git-status        show working tree status",
-                        "/git-diff [file]   show unstaged diff",
-                        "/git-log [n]       show recent commits (default: 10)",
-                        "/git-review        AI review of all changes (risks, architecture, security)",
-                        "/explain-commit    AI explanation of staged changes",
-                        "/generate-commit   AI-generated commit message from diff",
-                        "── sessions ──",
-                        "/new               create a new session",
-                        "/save [title]      mark current session saved",
-                        "/sessions          list saved sessions",
-                        "/session <id|num>  switch to a session",
-                        "/resume <id|num>   alias for /session",
-                        "/history [query]   search session history by title/keyword",
-                        "/clear             clear current session transcript",
-                        "── export ──",
-                        "/save-file <path>  save last response to a file",
-                        "/export            export full session as markdown",
-                        "/copy              copy last AI response to clipboard",
-                        "/print             print last response to terminal (selectable)",
-                        "── model ──",
-                        "/model <name>      switch active Ollama model",
-                        "/models            refresh installed model list",
-                        "keys: Ctrl+N new, Ctrl+S save, Ctrl+Y copy, Tab panes, Ctrl+C exit",
+                    command_help_lines()
+                    + [
+                        "keys: Ctrl+P palette, Ctrl+N new, Ctrl+S save, Ctrl+Y copy, Tab panes, Ctrl+C exit",
                     ]
                 )
             )
@@ -630,6 +602,14 @@ class AskWorkstationApp(App[None]):
         if command == "/save":
             self._save_current_session(title=arg or None)
             return
+        if command == "/rename":
+            if not arg:
+                self._notice("usage: /rename <title>")
+                return
+            self._session_manager.update_session_title(self._session_id, arg)
+            self._status_message = f"renamed session: {arg.strip()[:80]}"
+            self._refresh_all()
+            return
         if command == "/sessions":
             self._add_system_line("\n".join(self._format_session_lines()))
             return
@@ -690,7 +670,7 @@ class AskWorkstationApp(App[None]):
             return
         if command == "/resume":
             if not arg:
-                self._add_system_line("usage: /resume <id|number>")
+                self._show_session_picker()
                 return
             self._switch_session_from_arg(arg)
             return
@@ -906,6 +886,10 @@ class AskWorkstationApp(App[None]):
             if arg:
                 self._notice("[1/4] Scanning project structure...")
                 summary = self._file_context.set_context(arg)
+                workspace_label = str(self._file_context.active_root)
+                if workspace_label not in self._workspace_history:
+                    self._workspace_history.insert(0, workspace_label)
+                    self._workspace_history = self._workspace_history[:12]
                 root = self._file_context.active_root
 
                 self._notice("[2/4] Detecting languages and frameworks...")
@@ -1230,13 +1214,11 @@ class AskWorkstationApp(App[None]):
         return session_id
 
     def _auto_generate_session_title(self) -> None:
-        """Generate or update the session title based on conversation content.
-        
-        Triggers after 2+ messages. Uses the first user message to derive
-        a concise technical title. Only updates if the title is a default/untitled one.
-        """
+        """Generate or update the session title after intent is clear."""
         user_msgs = [m for m in self._chat_lines if m.role == "user"]
         if len(user_msgs) < 2:
+            return
+        if self._session_id in self._title_generation_inflight:
             return
 
         current_title = ""
@@ -1245,21 +1227,123 @@ class AskWorkstationApp(App[None]):
                 current_title = s.title
                 break
 
-        # Only auto-title if title is default/empty/untitled/or matches a session ID pattern
-        if current_title:
-            lower = current_title.lower()
-            _default_phrases = {"new session", "untitled session", "default", ""}
-            if lower not in _default_phrases and not lower.startswith("session "):
-                return
+        if not self._is_auto_title_candidate(current_title):
+            return
 
         messages_for_title = [
-            {"role": m.role, "content": m.content} for m in user_msgs
+            {"role": m.role, "content": m.content}
+            for m in self._chat_lines
+            if m.role in {"user", "assistant"} and m.content
         ]
-        title = generate_session_title(messages_for_title)
-        if title and title != current_title:
-            self._session_manager.update_session_title(self._session_id, title)
-            self._refresh_all()
+        session_id = self._session_id
+        model = self._active_chat_model
+        self._title_generation_inflight.add(session_id)
+        thread = threading.Thread(
+            target=self._title_generation_worker,
+            args=(session_id, model, messages_for_title, current_title),
+            daemon=True,
+        )
+        thread.start()
+
+    @staticmethod
+    def _is_auto_title_candidate(title: str) -> bool:
+        clean = (title or "").strip()
+        if not clean:
+            return True
+        lower = clean.lower()
+        if lower in {"new session", "untitled session", "default"}:
+            return True
+        return lower.startswith("session ") or lower.startswith("session-")
+
+    def _title_generation_worker(
+        self,
+        session_id: str,
+        model: str,
+        messages: list[dict[str, str]],
+        previous_title: str,
+    ) -> None:
+        title = ""
+        try:
+            prompt_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Create a concise human-readable title for this developer chat. "
+                        "Return only the title. Use 3 to 6 words. No quotes, punctuation suffix, or prefixes."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": self._title_prompt_context(messages),
+                },
+            ]
+            response = self._backend.chat(model=model, messages=prompt_messages, stream=False)
+            title = self._extract_chat_response_text(response)
+        except Exception:
+            title = ""
+
+        title = self._clean_generated_title(title)
+        if not title:
+            title = generate_session_title(messages)
+
+        self.call_from_thread(self._apply_generated_title, session_id, title, previous_title)
+
+    @staticmethod
+    def _title_prompt_context(messages: list[dict[str, str]]) -> str:
+        parts = []
+        for msg in messages[:6]:
+            role = msg.get("role", "user")
+            content = " ".join(msg.get("content", "").split())
+            if content:
+                parts.append(f"{role}: {content[:500]}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _extract_chat_response_text(response) -> str:
+        if isinstance(response, dict):
+            message = response.get("message")
+            if isinstance(message, dict):
+                return str(message.get("content", ""))
+            return str(response.get("response", "") or response.get("content", ""))
+        message = getattr(response, "message", None)
+        if isinstance(message, dict):
+            return str(message.get("content", ""))
+        content = getattr(message, "content", None)
+        if content is not None:
+            return str(content)
+        return str(getattr(response, "response", "") or getattr(response, "content", ""))
+
+    @staticmethod
+    def _clean_generated_title(title: str) -> str:
+        clean = " ".join(title.strip().strip("\"'`").split())
+        prefixes = ("title:", "session title:", "chat title:")
+        lower = clean.lower()
+        for prefix in prefixes:
+            if lower.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
+        clean = clean.rstrip(".:;-")
+        if len(clean) > 64:
+            clean = clean[:64].rsplit(" ", 1)[0]
+        if len(clean.split()) > 8:
+            clean = " ".join(clean.split()[:8])
+        return clean
+
+    def _apply_generated_title(self, session_id: str, title: str, previous_title: str) -> None:
+        self._title_generation_inflight.discard(session_id)
+        if not title:
+            return
+        current_title = ""
+        for s in self._session_manager.list_sessions():
+            if s.id == session_id:
+                current_title = s.title
+                break
+        if current_title and current_title != previous_title and not self._is_auto_title_candidate(current_title):
+            return
+        self._session_manager.update_session_title(session_id, title)
+        if session_id == self._session_id:
             self._status_message = f"session: {title}"
+            self._refresh_all()
 
     def _switch_session_from_arg(self, arg: str) -> None:
         if self._streaming:
@@ -1412,9 +1496,15 @@ class AskWorkstationApp(App[None]):
 
     def _render_chat(self) -> RenderableType:
         if not self._chat_lines:
-            return Text(
-                "No transcript loaded. Type a message or use /help.",
-                style=MUTED,
+            return Text.assemble(
+                ("ASK.AI READY\n", f"bold {GREEN}"),
+                ("Local AI Developer Workstation\n\n", MUTED),
+                ("Quick actions\n", f"bold {AMBER}"),
+                ("  /workspace .       Analyze Workspace\n", BEIGE),
+                ("  /review <file>     Review File\n", BEIGE),
+                ("  /explain <file>    Explain Code\n", BEIGE),
+                ("  Ask a question     Start a conversation\n\n", BEIGE),
+                ("Press Ctrl+P for Command Palette", f"bold {AMBER}"),
             )
 
         blocks: list[RenderableType] = []
@@ -1492,33 +1582,46 @@ class AskWorkstationApp(App[None]):
     def _render_status(self) -> RenderableType:
         memory = self._memory_label()
         stream = "STREAM:ON" if self._streaming else "STREAM:IDLE"
-        git_avail = "GIT" if self._git.is_available and self._settings.git_enabled else ""
+        git_avail = "GIT" if self._git.is_available and self._settings.git_enabled else "GIT:OFF"
         branch = ""
-        if git_avail:
+        if git_avail == "GIT":
             try:
                 b = self._git.current_branch
                 if b and b != "HEAD":
                     branch = f" [{b}]"
             except Exception:
                 pass
+        rag_label = "ON" if self._settings.rag_enabled else "OFF"
+        if self._settings.rag_enabled:
+            count = getattr(self._retriever, "count", None)
+            if callable(count):
+                try:
+                    rag_label = f"ON:{count()}"
+                except Exception:
+                    rag_label = "ON"
         ctx_label = self._file_context.active_root_label
         if self._project_summary:
             fc = self._project_summary.total_files
             lang_count = len(self._project_summary.languages)
             ctx_label = f"{ctx_label} ({fc}f, {lang_count}L)"
+        session_label = self._one_line(self._session_title_for(self._session_id), limit=34)
         return Text.assemble(
             ("MODEL ", MUTED),
             (self._active_chat_model, GREEN),
-            ("  |  CTX ", MUTED),
+            (" | WORKSPACE ", MUTED),
             (ctx_label, BEIGE),
-            ("  |  MEM ", MUTED),
+            (" | MEM ", MUTED),
             (memory, BEIGE),
-            ("  |  ", MUTED),
+            (" | RAG ", MUTED),
+            (rag_label, GREEN if self._settings.rag_enabled else MUTED),
+            (" | ", MUTED),
             (stream, AMBER if self._streaming else GREEN),
-            ("  |  OLLAMA ", MUTED),
+            (" | OLLAMA ", MUTED),
             (self._ollama_status.upper(), self._ollama_style()),
-            (f"  |  {git_avail}{branch} ", GREEN) if git_avail else Text(),
-            ("  |  ", MUTED),
+            (f" | {git_avail}{branch}", GREEN if git_avail == "GIT" else MUTED),
+            (" | SESSION ", MUTED),
+            (session_label, BEIGE),
+            (" | ", MUTED),
             (self._status_message, BEIGE),
         )
 

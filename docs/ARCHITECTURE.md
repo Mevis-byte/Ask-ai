@@ -38,28 +38,51 @@ User Input
 └──────────────┘
 ```
 
-## Package Structure
+## Current Package Structure
 
 ```
 ask/
-├── __init__.py          # package marker
-├── __main__.py          # CLI entry: ask ai, ask chat, ask analyze
-├── chat.py              # plain-terminal chat REPL loop
-├── config.py            # Settings dataclass, layered config loader
-├── engine.py            # stream_ollama(), prompt building
-├── exporter.py          # /save-file, /export session transcripts
-├── git_plugin.py        # read-only git commands (status, diff, log)
-├── llm.py               # HTTP client to Ollama API
-├── main.py              # Textual TUI app definition
-├── memory.py            # SQLite-backed MessageStore with FTS5 search
-├── model_router.py      # task-aware model selection
-├── rag.py               # ChromaDB-based vector retriever (optional)
-├── retriever.py         # Retriever protocol + NoOpRetriever
-├── settings.py          # Textual settings pane
-├── sessions.py          # Textual session list pane
-├── tools.py             # File operations (read, find, workspace)
-└── utils.py             # formatting helpers, markdown rendering
+├── main.py                  # Typer CLI: ask ai, ask chat, ask analyze
+├── app/
+│   ├── bootstrap.py         # Plain chat app assembly
+│   ├── chat.py              # Plain-terminal REPL
+│   ├── session_manager.py   # Session creation/list/switch/title APIs
+│   └── workstation.py       # Textual workstation assembly
+├── ui/
+│   ├── workstation.py       # Main Textual app, layout, input, slash routing
+│   ├── home_screen.py       # Startup home screen
+│   ├── ask_command_palette.py # Ctrl+P fuzzy command palette
+│   ├── pickers.py           # Session/model/workspace pickers
+│   ├── fuzzy.py             # RapidFuzz helpers
+│   └── command_catalog.py   # Shared command metadata
+├── memory/
+│   ├── sqlite_memory.py     # SQLite history, metadata, FTS5 context search
+│   └── in_memory.py         # RAM fallback
+├── files/local_context.py   # Read-only workspace context and file search
+├── tools/
+│   ├── files.py             # File analysis prompts and render panels
+│   └── scanner.py           # Project scan and dependency graph
+├── rag/                     # ChromaDB retriever and prompt injection helpers
+├── models/                  # Ollama backend and model router
+├── plugins/git/plugin.py    # Read-only git integration
+├── security/                # Validation, prompt-injection checks, output filtering
+└── config/                  # Defaults, JSON config, env overrides, save support
 ```
+
+## Workstation Runtime
+
+The Textual workstation preserves a three-pane layout:
+
+- Left: sessions and current trace.
+- Center: chat transcript and empty-state actions.
+- Right: settings, local model state, workspace, git, and file context.
+- Bottom: persistent status bar and command/message input.
+
+Startup pushes a home screen overlay before the active session is entered. The home screen reads session/model/workspace state from the already-mounted workstation and dismisses into the same app instance.
+
+`Ctrl+P` opens the command palette. The palette uses the shared command catalog plus dynamic sessions, installed models, and workspace files. Complete commands execute through the existing `_handle_command` dispatcher; commands needing arguments are inserted into the input.
+
+Session titles are stored in the existing SQLite `conversations.title` column. Older databases are migrated by `sqlite_memory.py`; generated-id sessions are displayed as `New Session` until an AI-generated or manual title is available.
 
 ## Key Design Decisions
 

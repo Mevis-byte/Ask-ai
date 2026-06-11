@@ -17,6 +17,7 @@ Detailed documentation is available in the [`docs/`](./docs/) directory:
 | [OVERVIEW.md](./docs/OVERVIEW.md) | High-level overview and feature summary |
 | [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System architecture and design decisions |
 | [COMMANDS.md](./docs/COMMANDS.md) | Complete command reference |
+| [KEYBOARD_SHORTCUTS.md](./docs/KEYBOARD_SHORTCUTS.md) | Textual workstation keyboard shortcuts |
 | [CONFIGURATION.md](./docs/CONFIGURATION.md) | All configuration options and env variables |
 | [SETUP.md](./docs/SETUP.md) | Installation and troubleshooting guide |
 
@@ -159,7 +160,10 @@ No destructive git commands are exposed.
 
 * Terminal-based interface
 * Three-pane layout (sessions, chat, settings)
+* Dedicated home screen with recent sessions, workspace actions, shortcuts, and tips
+* `Ctrl+P` command palette with fuzzy search across commands, sessions, models, and files
 * Status indicators (model, memory, Ollama, git, context)
+* Readable AI-generated session titles with manual rename support
 * Session management
 * Retro workstation-inspired layout
 * Clipboard copy (Ctrl+Y)
@@ -534,4 +538,3 @@ GitHub:
 # License
 
 MIT License
-

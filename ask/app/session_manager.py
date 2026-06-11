@@ -61,6 +61,24 @@ def _new_session_id() -> str:
     return f"session-{stamp}"
 
 
+def _is_generated_session_label(session_id: str, title: str) -> bool:
+    clean = (title or "").strip()
+    if not clean:
+        return True
+    if clean == session_id:
+        return True
+    lower = clean.lower()
+    return lower.startswith("session-") or re.match(r"^session\s+\d{8}\s+\d{6}", lower) is not None
+
+
+def _display_session_title(session_id: str, title: str) -> str:
+    if session_id == "default" and (not title or title == "default"):
+        return "Default"
+    if _is_generated_session_label(session_id, title):
+        return "New Session"
+    return title
+
+
 def derive_session_title(text: str) -> str:
     clean = " ".join(text.split())
     if not clean:
@@ -208,7 +226,7 @@ class ChatSessionManager:
         return [
             SessionInfo(
                 id=item.id,
-                title=item.title,
+                title=_display_session_title(item.id, item.title),
                 summary=item.summary,
                 metadata=item.metadata,
                 created_at=item.created_at,
@@ -311,7 +329,7 @@ class ChatSessionManager:
     def _ram_info(session_id: str, meta: _RamSession) -> SessionInfo:
         return SessionInfo(
             id=session_id,
-            title=meta.title,
+            title=_display_session_title(session_id, meta.title),
             summary=meta.summary,
             metadata=meta.metadata,
             created_at=meta.created_at,

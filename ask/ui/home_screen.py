@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     from ask.ui.workstation import AskWorkstationApp
 
 _TIPS = [
+    "Use /review file.py to find issues.",
+    "Use /find auth to search workspace context.",
+    "Press Ctrl+P to access commands.",
+    "Use /workspace to load a project.",
     "Type /workspace <dir> to inject code architecture into the AI context.",
     "Use /explain <file> to get AI analysis of source code.",
     "Ctrl+N starts a new session; Ctrl+S saves the current one.",
@@ -34,10 +38,11 @@ _TIPS = [
     "Use /save to bookmark a session with a meaningful title.",
 ]
 
-LOGO_ASCII = """               / \\   / ___|| |/ / / \\  |_ _|
-              / _ \\  \\___ \\| ' / / _ \\  | |
-             / ___ \\  ___) | . \\/ ___ \\ | |
-            /_/   \\_\\|____/|_|\\_\\_/   \\_\\___|"""
+LOGO_ASCII = """    ___    _____ __ __     ___    __
+   /   |  / ___// //_/.   /   |  / /
+  / /| |  \\__ \\/ ,<      / /| | / /
+ / ___ | ___/ / /| | _  / ___ |/ /___
+/_/  |_|/____/_/ |_|(_)/_/  |_/_____/"""
 
 
 class HomeScreen(Screen):
@@ -165,13 +170,13 @@ HomeScreen {{
 
     def _render_status(self) -> None:
         app: AskWorkstationApp = self.app  # type: ignore
-        from ask import __version__ as ver_mod
-        v = getattr(ver_mod, "__version__", "0.1.0")
+        from ask import __version__
+        v = __version__
         model = getattr(app, "_active_chat_model", "Ollama (Auto)")
         ctx = "None"
         if hasattr(app, "_file_context") and app._file_context.active_root:
             ctx = str(app._file_context.active_root)
-        line = f"LOCAL NEURAL SHELL  v{v}  |  Model: {model}  |  Context: {ctx}"
+        line = f"Local AI Developer Workstation  v{v}  |  Model: {model}  |  Workspace: {ctx}"
         self.query_one("#home-status", Static).update(
             Text(f"  {line}\n", style=MUTED)
         )
@@ -182,13 +187,23 @@ HomeScreen {{
 
         lines = ["─" * 40]
         actions = [
-            ("w", "Load Current Workspace Context", "/workspace ."),
-            ("g", "Run AI Git Review on Changes", "/git-review"),
-            ("m", "Change Active Ollama Model", "/models"),
-            ("n", "Open Fresh Chat Session", "/new"),
+            ("n", "New Session", "/new"),
+            ("r", "Resume Session", "/session"),
+            ("w", "Open Workspace", "/workspace"),
+            ("m", "Change Model", "/model"),
+            ("s", "Settings and Help", "/help"),
         ]
         for key, desc, _ in actions:
             lines.append(f"[{key}] {desc}")
+        lines.append("")
+        lines.append("Recent workspaces:")
+        app: AskWorkstationApp = self.app  # type: ignore
+        workspaces = getattr(app, "_workspace_history", [])
+        if workspaces:
+            for item in workspaces[:3]:
+                lines.append(f"    {item}")
+        else:
+            lines.append("    current directory")
         lines.append("")
 
         self.query_one("#home-quick-box", Static).update(
@@ -221,7 +236,7 @@ HomeScreen {{
     def _render_tip(self) -> None:
         tip = random.choice(_TIPS)
         self.query_one("#home-tip", Static).update(
-            Text(f"  \U0001f4a1 Tip: {tip}", style=MUTED)
+            Text(f"  Tip: {tip}", style=MUTED)
         )
 
     def _rotate_tip(self) -> None:
@@ -230,13 +245,13 @@ HomeScreen {{
     def _render_prompt(self) -> None:
         bar = "─" * 74
         self.query_one("#home-prompt-bar", Static).update(
-            Text(f"  \n  (ASKAI) \u276f Type a prompt or a slash command...\n  {bar}", style=BEIGE)
+            Text(f"  \n  ASK.AI> Type a prompt, press Enter, or press Ctrl+P...\n  {bar}", style=BEIGE)
         )
 
     def _render_footer(self) -> None:
         self.query_one("#home-footer", Static).update(
             Text(
-                "  keys: Ctrl+N new, Ctrl+S save, Ctrl+Y copy, Tab panes, Ctrl+C exit",
+                "  keys: Ctrl+P palette, Ctrl+N new, Ctrl+S save, Ctrl+Y copy, Tab panes, Esc start, Ctrl+C exit",
                 style=MUTED,
             )
         )
@@ -318,19 +333,23 @@ HomeScreen {{
             return
 
         if key == "w":
-            self._dismiss_and_run_command("/workspace .")
+            self._dismiss_and_run_command("/workspace")
             event.stop()
             return
-        if key == "g":
-            self._dismiss_and_run_command("/git-review")
+        if key == "r":
+            self._dismiss_and_run_command("/session")
             event.stop()
             return
         if key == "m":
-            self._dismiss_and_run_command("/models")
+            self._dismiss_and_run_command("/model")
             event.stop()
             return
         if key == "n":
             self._dismiss_and_run_command("/new")
+            event.stop()
+            return
+        if key == "s":
+            self._dismiss_and_run_command("/help")
             event.stop()
             return
 
@@ -388,8 +407,13 @@ HomeScreen {{
         app.pop_screen()
         try:
             inp = app.query_one("#command-input", Input)
-            inp.value = command
             inp.focus()
+            if command in {"/model", "/session", "/workspace"}:
+                app._handle_command(command)
+            elif command.startswith("/"):
+                app._handle_command(command)
+            else:
+                inp.value = command
         except Exception:
             pass
 
@@ -402,9 +426,15 @@ HomeScreen {{
         app.pop_screen()
         def on_palette_dismissed(result: str | None) -> None:
             if result:
-                inp = app.query_one("#command-input", Input)
-                inp.value = result
-                inp.focus()
+                if result.endswith(" "):
+                    inp = app.query_one("#command-input", Input)
+                    inp.value = result
+                    inp.cursor_position = len(result)
+                    inp.focus()
+                elif result.startswith("/"):
+                    app._handle_command(result)
+                else:
+                    app._submit_user_message(result)
         app.push_screen(CommandPalette(app), on_palette_dismissed)
 
     def action_new_session(self) -> None:

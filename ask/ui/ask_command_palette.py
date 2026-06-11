@@ -10,53 +10,12 @@ from textual.screen import Screen
 from textual.widgets import Input, ListItem, Static
 from textual import events
 
+from ask.ui.command_catalog import COMMANDS
 from ask.ui.fuzzy import fuzzy_filter_objects
-from ask.ui.colors import AMBER, BEIGE, BG, DIM, ERROR, PANE
+from ask.ui.colors import AMBER, BEIGE, BG, DIM, PANE
 
 if TYPE_CHECKING:
     from ask.ui.workstation import AskWorkstationApp
-
-_COMMAND_CATEGORIES: list[tuple[str, list[tuple[str, str]]]] = [
-    ("Workspace", [
-        ("Analyze Workspace", "/workspace ."),
-        ("Show Context", "/context"),
-        ("Clear Context", "/clear-context"),
-        ("Read File <file>", "/read "),
-        ("Find in Files <pattern>", "/find "),
-    ]),
-    ("Git", [
-        ("Git Status", "/git-status"),
-        ("Git Diff [file]", "/git-diff"),
-        ("Git Log [n]", "/git-log"),
-        ("Git Review", "/git-review"),
-        ("Explain Commit", "/explain-commit"),
-        ("Generate Commit Message", "/generate-commit"),
-    ]),
-    ("Sessions", [
-        ("New Session", "/new"),
-        ("Save Session [title]", "/save"),
-        ("List Sessions", "/sessions"),
-        ("Session History <query>", "/history"),
-        ("Clear Session", "/clear"),
-    ]),
-    ("Models", [
-        ("Switch Model <name>", "/model "),
-        ("List Models", "/models"),
-        ("Set Ollama Host <url>", "/baseurl "),
-    ]),
-    ("Export", [
-        ("Save Response to File <path>", "/save-file "),
-        ("Export Session as Markdown", "/export"),
-        ("Copy Last Response", "/copy"),
-        ("Print to Terminal", "/print"),
-    ]),
-    ("Files", [
-        ("Explain File <file>", "/explain "),
-        ("Summarize File <file>", "/summarize "),
-        ("Review File <file>", "/review "),
-    ]),
-]
-
 
 class PaletteItem(ListItem):
     def __init__(self, label: str, command: str, category: str) -> None:
@@ -134,13 +93,45 @@ CommandPalette {{
     def __init__(self, app_ref: AskWorkstationApp) -> None:
         super().__init__()
         self._app_ref = app_ref
-        self._all_entries: list[tuple[str, str, str]] = []
+        self._all_entries: list[tuple[str, str, str, str]] = []
         self._build_entries()
 
     def _build_entries(self) -> None:
-        for cat, items in _COMMAND_CATEGORIES:
-            for label, cmd in items:
-                self._all_entries.append((label, cmd, cat))
+        self._all_entries.clear()
+        for spec in COMMANDS:
+            label = f"{spec.title} - {spec.description}"
+            self._all_entries.append((label, spec.command, spec.category, spec.title))
+
+        for session in self._app_ref._session_manager.list_sessions()[:20]:
+            title = session.title if session.title else "New Session"
+            self._all_entries.append(
+                (f"{title} - {session.message_count} messages", f"/session {session.id}", "Sessions", title)
+            )
+
+        for name, size in self._app_ref._installed_models:
+            self._all_entries.append((f"{name} - {size}", f"/model {name}", "Models", name))
+
+        for path in self._workspace_files(limit=80):
+            self._all_entries.append((f"{path} - read file", f"/read {path}", "Files", path))
+            self._all_entries.append((f"{path} - explain file", f"/explain {path}", "Files", path))
+
+    def _workspace_files(self, *, limit: int) -> list[str]:
+        ctx = self._app_ref._file_context
+        root = ctx.active_root
+        files: list[str] = []
+        try:
+            for current, dirs, names in ctx._walk(root):
+                ctx._filter_dirs(current, dirs)
+                for name in sorted(names):
+                    path = current / name
+                    if ctx._should_skip_file(path):
+                        continue
+                    files.append(ctx._display_path(path))
+                    if len(files) >= limit:
+                        return files
+        except Exception:
+            return files
+        return files
 
     def compose(self) -> ComposeResult:
         yield Static("COMMAND PALETTE", id="cp-title", classes="cp-header")
@@ -149,6 +140,7 @@ CommandPalette {{
 
     def on_mount(self) -> None:
         self.query_one("#cp-input", Input).focus()
+        self._filter("")
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         self._filter(event.value)
@@ -162,36 +154,27 @@ CommandPalette {{
         scroll.remove_children()
         if not query:
             current_cat = ""
-            for cat, items in _COMMAND_CATEGORIES:
+            for label, cmd, cat, title in self._all_entries:
                 if cat != current_cat:
                     scroll.mount(CategoryHeader(Text(f"\n{cat}\n", style=f"bold {AMBER}")))
                     current_cat = cat
-                for label, cmd in items:
-                    display = self._display_line(cat, label)
-                    scroll.mount(PaletteItem(display, cmd, cat))
+                display = self._display_line(cat, title)
+                scroll.mount(PaletteItem(display, cmd, cat))
         else:
             filtered = fuzzy_filter_objects(
-                [(label, cmd) for label, cmd, _ in self._all_entries],
+                [(label, cmd, cat, title) for label, cmd, cat, title in self._all_entries],
                 query,
                 score_cutoff=0.3,
                 limit=30,
             )
             current_cat = ""
-            for label, cmd, _ in filtered:
-                cat = self._find_category(cmd)
+            for label, cmd, cat, title, _score in filtered:
                 if cat != current_cat:
                     scroll.mount(CategoryHeader(Text(f"\n{cat}\n", style=f"bold {AMBER}")))
                     current_cat = cat
-                display = self._display_line(cat, label) if cat else label
+                display = self._display_line(cat, title) if cat else title
                 scroll.mount(PaletteItem(display, cmd, cat))
-        if scroll.children:
-            scroll.children[0].focus()
-
-    def _find_category(self, command: str) -> str:
-        for label, cmd, cat in self._all_entries:
-            if cmd == command:
-                return cat
-        return ""
+        self._focus_first_item()
 
     async def on_key(self, event: events.Key) -> None:
         if event.key == "down":
@@ -213,11 +196,21 @@ CommandPalette {{
                 current_idx = i
                 break
         if current_idx < 0:
-            children[0].focus()
+            self._focus_first_item()
             return
         next_idx = current_idx + direction
-        if 0 <= next_idx < len(children):
-            children[next_idx].focus()
+        while 0 <= next_idx < len(children):
+            if isinstance(children[next_idx], PaletteItem):
+                children[next_idx].focus()
+                return
+            next_idx += direction
+
+    def _focus_first_item(self) -> None:
+        scroll = self.query_one("#cp-results", VerticalScroll)
+        for child in scroll.children:
+            if isinstance(child, PaletteItem):
+                child.focus()
+                return
 
     async def on_list_item_selected(self, event: ListItem.Selected) -> None:
         item = event.item
